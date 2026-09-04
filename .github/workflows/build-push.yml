@@ -1,49 +1,37 @@
-name: Build and Push PureOTA
+name: PureOTA CI-CD
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: pureota-production
+  cancel-in-progress: false
+
 env:
-  ACR_LOGIN_SERVER: nandaacrarrowheadaca.azurecr.io
+  ACR_LOGIN_SERVER: nandaacrararrowheadaca.azurecr.io
+  ACR_NAME: nandaacrararrowheadaca
   IMAGE_NAME: pureota
+  RESOURCE_GROUP: NANDA-rg-arrowhead-aca-test
+  CONTAINER_APP_NAME: nanda-ca-pureota
 
 jobs:
   build-and-push:
+    name: Build and Push Image
     runs-on: ubuntu-latest
+
+    outputs:
+      image: ${{ steps.image.outputs.image }}
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Verify Azure secret availability
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        run: |
-          if [ -z "$AZURE_CLIENT_ID" ]; then
-            echo "AZURE_CLIENT_ID is EMPTY"
-          else
-            echo "AZURE_CLIENT_ID is PRESENT"
-          fi
-
-          if [ -z "$AZURE_TENANT_ID" ]; then
-            echo "AZURE_TENANT_ID is EMPTY"
-          else
-            echo "AZURE_TENANT_ID is PRESENT"
-          fi
-
-          if [ -z "$AZURE_SUBSCRIPTION_ID" ]; then
-            echo "AZURE_SUBSCRIPTION_ID is EMPTY"
-          else
-            echo "AZURE_SUBSCRIPTION_ID is PRESENT"
-          fi
 
       - name: Azure login with OIDC
         uses: azure/login@v2
@@ -54,20 +42,141 @@ jobs:
 
       - name: Login to Azure Container Registry
         run: |
-          az acr login --name nandaacrarrowheadaca
+          az acr login --name "$ACR_NAME"
 
       - name: Build Docker image
         run: |
           docker build \
-            -t $ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }} \
+            -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}" \
             .
 
       - name: Push Docker image
         run: |
           docker push \
-            $ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}
+            "$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
 
-      - name: Display image
+      - name: Record immutable image
+        id: image
         run: |
-          echo "Image pushed:"
-          echo "$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
+          IMAGE="$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Published image: $IMAGE"
+
+  deploy:
+    name: Deploy PureOTA
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    # Enable this only after we configure the GitHub Environment.
+    # environment: production
+
+    steps:
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Capture current revision
+        id: current
+        shell: bash
+        run: |
+          CURRENT_REVISION=$(az containerapp revision list \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --all \
+            --query "[?properties.trafficWeight > \`0\`].name | [0]" \
+            -o tsv)
+
+          echo "current_revision=$CURRENT_REVISION" >> "$GITHUB_OUTPUT"
+          echo "Current revision: $CURRENT_REVISION"
+
+      - name: Deploy SHA image
+        run: |
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "${{ needs.build-and-push.outputs.image }}"
+
+      - name: Wait for new revision
+        id: revision
+        shell: bash
+        run: |
+          for i in {1..30}; do
+
+            REVISION=$(az containerapp revision list \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --all \
+              --query "[?properties.template.containers[0].image=='${{ needs.build-and-push.outputs.image }}'].name | [0]" \
+              -o tsv)
+
+            if [ -n "$REVISION" ]; then
+              echo "New revision: $REVISION"
+              echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Waiting for revision..."
+            sleep 10
+          done
+
+          echo "ERROR: New revision was not created."
+          exit 1
+
+      - name: Check revision health
+        shell: bash
+        run: |
+          REVISION="${{ steps.revision.outputs.revision }}"
+
+          for i in {1..30}; do
+
+            STATUS=$(az containerapp revision show \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --revision "$REVISION" \
+              --query "properties.runningState" \
+              -o tsv)
+
+            HEALTH=$(az containerapp revision show \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --revision "$REVISION" \
+              --query "properties.healthState" \
+              -o tsv)
+
+            echo "Revision: $REVISION"
+            echo "Running state: $STATUS"
+            echo "Health state: $HEALTH"
+
+            if [ "$STATUS" = "Running" ] && [ "$HEALTH" = "Healthy" ]; then
+              echo "Revision is healthy."
+              exit 0
+            fi
+
+            if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Degraded" ]; then
+              echo "Revision failed."
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "ERROR: Revision did not become healthy."
+          exit 1
+
+      - name: Shift traffic to new revision
+        run: |
+          REVISION="${{ steps.revision.outputs.revision }}"
+
+          az containerapp ingress traffic set \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --revision-weight "$REVISION=100"
+
+      - name: Deployment summary
+        run: |
+          echo "Deployment successful."
+          echo "Image: ${{ needs.build-and-push.outputs.image }}"
+          echo "Revision: ${{ steps.revision.outputs.revision }}"
