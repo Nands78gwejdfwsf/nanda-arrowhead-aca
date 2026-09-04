@@ -15,13 +15,14 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ACR_LOGIN_SERVER: nandaacrarrowheadaca.azurecr.io
-  ACR_NAME: nandaacrarrowheadaca
+  ACR_LOGIN_SERVER: nandaacrararrowheadaca.azurecr.io
+  ACR_NAME: nandaacrararrowheadaca
   IMAGE_NAME: pureota
   RESOURCE_GROUP: NANDA-rg-arrowhead-aca-test
   CONTAINER_APP_NAME: nanda-ca-pureota
 
 jobs:
+
   build-and-push:
     name: Build and Push Image
     runs-on: ubuntu-latest
@@ -30,6 +31,7 @@ jobs:
       image: ${{ steps.image.outputs.image }}
 
     steps:
+
       - name: Checkout source
         uses: actions/checkout@v4
 
@@ -62,15 +64,18 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "Published image: $IMAGE"
 
+
   deploy:
     name: Deploy PureOTA
     needs: build-and-push
     runs-on: ubuntu-latest
 
-    # Enable this only after we configure the GitHub Environment.
-    # environment: production
+    outputs:
+      revision: ${{ steps.revision.outputs.revision }}
+      image: ${{ needs.build-and-push.outputs.image }}
 
     steps:
+
       - name: Azure login with OIDC
         uses: azure/login@v2
         with:
@@ -134,6 +139,7 @@ jobs:
           echo "Checking revision: $REVISION"
 
           for i in {1..30}; do
+
             echo "Health check attempt $i/30"
 
             RESULT=$(az containerapp revision show \
@@ -170,13 +176,15 @@ jobs:
               exit 1
             fi
 
-            if [ "$RUNNING_STATE" = "RunningAtMaxScale" ] && [ "$HEALTH_STATE" = "Healthy" ]; then
-              echo "Revision is healthy and ready for traffic."
+            if [ "$RUNNING_STATE" = "RunningAtMaxScale" ] && \
+               [ "$HEALTH_STATE" = "Healthy" ]; then
+              echo "Revision is healthy and ready for approval."
               exit 0
             fi
 
-            if [ "$RUNNING_STATE" = "Running" ] && [ "$HEALTH_STATE" = "Healthy" ]; then
-              echo "Revision is healthy and ready for traffic."
+            if [ "$RUNNING_STATE" = "Running" ] && \
+               [ "$HEALTH_STATE" = "Healthy" ]; then
+              echo "Revision is healthy and ready for approval."
               exit 0
             fi
 
@@ -187,17 +195,52 @@ jobs:
           echo "ERROR: Revision did not become healthy within the timeout."
           exit 1
 
-      - name: Shift traffic to new revision
+
+  promote:
+    name: Approve and Shift Traffic
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    steps:
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Shift traffic to approved revision
         run: |
-          REVISION="${{ steps.revision.outputs.revision }}"
+          REVISION="${{ needs.deploy.outputs.revision }}"
+
+          echo "Approved revision:"
+          echo "$REVISION"
+
+          echo "Shifting 100% traffic to approved revision..."
 
           az containerapp ingress traffic set \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --revision-weight "$REVISION=100"
 
+      - name: Verify traffic
+        run: |
+          az containerapp ingress traffic show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --output table
+
       - name: Deployment summary
         run: |
-          echo "Deployment successful."
-          echo "Image: ${{ needs.build-and-push.outputs.image }}"
-          echo "Revision: ${{ steps.revision.outputs.revision }}"
+          echo "======================================"
+          echo "PureOTA deployment completed"
+          echo "======================================"
+          echo "Image:    ${{ needs.deploy.outputs.image }}"
+          echo "Revision: ${{ needs.deploy.outputs.revision }}"
+          echo "Traffic:  100%"
+          echo "Approval: production environment"
+          echo "======================================"
