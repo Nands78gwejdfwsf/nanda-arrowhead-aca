@@ -1,0 +1,142 @@
+name: PureOTA Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Full Git commit SHA to roll back to"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: pureota-rollback
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: NANDA-rg-arrowhead-aca-test
+  CONTAINER_APP_NAME: nanda-ca-pureota
+
+jobs:
+  rollback:
+    name: Rollback PureOTA
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Find target revision
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHA="${{ inputs.commit_sha }}"
+
+          echo "Looking for revision containing image SHA:"
+          echo "$SHA"
+
+          REVISION=$(az containerapp revision list \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --all \
+            --query "[?contains(properties.template.containers[0].image, '$SHA')].name | [0]" \
+            --output tsv)
+
+          if [ -z "$REVISION" ]; then
+            echo "ERROR: No ACA revision found for commit SHA: $SHA"
+            exit 1
+          fi
+
+          echo "Target revision: $REVISION"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Show target revision
+        shell: bash
+        run: |
+          az containerapp revision show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --revision "${{ steps.target.outputs.revision }}" \
+            --query "{revision:name,image:properties.template.containers[0].image,health:properties.healthState,running:properties.runningState,provisioning:properties.provisioningState}" \
+            --output table
+
+      - name: Validate target revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REVISION="${{ steps.target.outputs.revision }}"
+
+          for attempt in {1..10}; do
+            echo "Health check attempt $attempt/10..."
+
+            DETAILS=$(az containerapp revision show \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --revision "$REVISION" \
+              --query "{health:properties.healthState,running:properties.runningState,provisioning:properties.provisioningState}" \
+              --output json)
+
+            echo "$DETAILS"
+
+            HEALTH=$(echo "$DETAILS" | jq -r '.health')
+            RUNNING=$(echo "$DETAILS" | jq -r '.running')
+            PROVISIONING=$(echo "$DETAILS" | jq -r '.provisioning')
+
+            if [ "$PROVISIONING" = "Provisioned" ] && \
+               [ "$HEALTH" = "Healthy" ] && \
+               { [ "$RUNNING" = "Running" ] || [ "$RUNNING" = "RunningAtMaxScale" ]; }; then
+              echo "Target revision is healthy."
+              exit 0
+            fi
+
+            if [ "$PROVISIONING" = "Failed" ] || [ "$RUNNING" = "Failed" ]; then
+              echo "ERROR: Target revision is not healthy."
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "ERROR: Target revision did not become healthy."
+          exit 1
+
+      - name: Shift traffic to rollback revision
+        run: |
+          set -euo pipefail
+
+          REVISION="${{ steps.target.outputs.revision }}"
+
+          echo "Shifting 100% traffic to:"
+          echo "$REVISION"
+
+          az containerapp ingress traffic set \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --revision-weight "$REVISION=100"
+
+      - name: Verify rollback traffic
+        run: |
+          az containerapp ingress traffic show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --output table
+
+      - name: Rollback summary
+        run: |
+          echo "======================================"
+          echo "PureOTA rollback completed"
+          echo "======================================"
+          echo "Commit SHA : ${{ inputs.commit_sha }}"
+          echo "Revision   : ${{ steps.target.outputs.revision }}"
+          echo "Traffic    : 100%"
+          echo "======================================"
