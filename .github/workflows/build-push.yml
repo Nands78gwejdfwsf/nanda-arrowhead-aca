@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ACR_LOGIN_SERVER: nandaacrararrowheadaca.azurecr.io
-  ACR_NAME: nandaacrararrowheadaca
+  ACR_LOGIN_SERVER: nandaacrarrowheadaca.azurecr.io
+  ACR_NAME: nandaacrarrowheadaca
   IMAGE_NAME: pureota
   RESOURCE_GROUP: NANDA-rg-arrowhead-aca-test
   CONTAINER_APP_NAME: nanda-ca-pureota
