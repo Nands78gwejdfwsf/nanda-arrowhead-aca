@@ -125,7 +125,7 @@ jobs:
           echo "ERROR: New revision was not created."
           exit 1
 
-            - name: Check revision health
+      - name: Check revision health
         id: health
         shell: bash
         run: |
