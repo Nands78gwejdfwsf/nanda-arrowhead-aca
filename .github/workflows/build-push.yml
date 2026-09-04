@@ -125,45 +125,66 @@ jobs:
           echo "ERROR: New revision was not created."
           exit 1
 
-      - name: Check revision health
+            - name: Check revision health
+        id: health
         shell: bash
         run: |
           REVISION="${{ steps.revision.outputs.revision }}"
 
+          echo "Checking revision: $REVISION"
+
           for i in {1..30}; do
+            echo "Health check attempt $i/30"
 
-            STATUS=$(az containerapp revision show \
+            RESULT=$(az containerapp revision show \
               --name "$CONTAINER_APP_NAME" \
               --resource-group "$RESOURCE_GROUP" \
               --revision "$REVISION" \
-              --query "properties.runningState" \
-              -o tsv)
+              --query "{runningState:properties.runningState,healthState:properties.healthState,provisioningState:properties.provisioningState}" \
+              -o json 2>/tmp/aca-health-error)
 
-            HEALTH=$(az containerapp revision show \
-              --name "$CONTAINER_APP_NAME" \
-              --resource-group "$RESOURCE_GROUP" \
-              --revision "$REVISION" \
-              --query "properties.healthState" \
-              -o tsv)
+            EXIT_CODE=$?
 
-            echo "Revision: $REVISION"
-            echo "Running state: $STATUS"
-            echo "Health state: $HEALTH"
-
-            if [ "$STATUS" = "Running" ] && [ "$HEALTH" = "Healthy" ]; then
-              echo "Revision is healthy."
-              exit 0
+            if [ $EXIT_CODE -ne 0 ]; then
+              echo "Azure API returned an error. Retrying..."
+              cat /tmp/aca-health-error
+              sleep 10
+              continue
             fi
 
-            if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Degraded" ]; then
-              echo "Revision failed."
+            RUNNING_STATE=$(echo "$RESULT" | jq -r '.runningState // "None"')
+            HEALTH_STATE=$(echo "$RESULT" | jq -r '.healthState // "None"')
+            PROVISIONING_STATE=$(echo "$RESULT" | jq -r '.provisioningState // "None"')
+
+            echo "Provisioning state: $PROVISIONING_STATE"
+            echo "Running state:      $RUNNING_STATE"
+            echo "Health state:       $HEALTH_STATE"
+
+            if [ "$PROVISIONING_STATE" = "Failed" ]; then
+              echo "Revision provisioning failed."
               exit 1
             fi
 
+            if [ "$RUNNING_STATE" = "Failed" ]; then
+              echo "Revision running state is Failed."
+              exit 1
+            fi
+
+            if [ "$RUNNING_STATE" = "RunningAtMaxScale" ] && [ "$HEALTH_STATE" = "Healthy" ]; then
+              echo "Revision is healthy and ready for traffic."
+              exit 0
+            fi
+
+            if [ "$RUNNING_STATE" = "Running" ] && [ "$HEALTH_STATE" = "Healthy" ]; then
+              echo "Revision is healthy and ready for traffic."
+              exit 0
+            fi
+
+            echo "Revision is not ready yet. Waiting..."
             sleep 10
           done
 
-          echo "ERROR: Revision did not become healthy."
+          echo "ERROR: Revision did not become healthy within the timeout."
           exit 1
 
       - name: Shift traffic to new revision
