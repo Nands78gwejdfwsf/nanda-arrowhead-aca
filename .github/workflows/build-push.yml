@@ -428,17 +428,31 @@ jobs:
 
           JOB_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/jobs/${CONTAINER_APP_JOB_NAME}"
 
-          echo "Updating ACA Job:"
+          JOB_URL="https://management.azure.com${JOB_ID}?api-version=2025-01-01"
+
+          echo "Reading ACA Job:"
           echo "$JOB_ID"
-          echo "Image:"
+
+          JOB_JSON=$(az rest \
+            --method get \
+            --url "$JOB_URL")
+
+          echo "Updating ACA Job image to:"
           echo "$IMAGE"
 
-          az containerapp job update \
-            --ids "$JOB_ID" \
-            --image "$IMAGE"
+          UPDATED_BODY=$(echo "$JOB_JSON" | jq \
+            --arg image "$IMAGE" \
+            '.properties.template.containers[0].image = $image |
+             {properties: .properties}')
 
-          echo "ACA Job image updated."
+          az rest \
+            --method patch \
+            --url "$JOB_URL" \
+            --headers "Content-Type=application/json" \
+            --body "$UPDATED_BODY" \
+            --output none
 
+          echo "ACA Job image updated successfully."
 
 
       # ----------------------------------------------------------
