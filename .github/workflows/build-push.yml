@@ -124,12 +124,15 @@ jobs:
       # Deploy immutable SHA image
       # ----------------------------------------------------------
 
-      - name: Deploy SHA image
+      - name: Deploy BAD image - FAILURE TEST ONLY
         run: |
-          IMAGE="${{ needs.build-and-push.outputs.image }}"
+          IMAGE="$ACR_LOGIN_SERVER/$IMAGE_NAME:failure-test-${{ github.sha }}"
 
-          echo "Deploying image:"
+          echo "======================================"
+          echo "FAILURE TEST"
+          echo "Deploying intentionally invalid image:"
           echo "$IMAGE"
+          echo "======================================"
 
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
@@ -145,7 +148,7 @@ jobs:
         id: revision
         shell: bash
         run: |
-          IMAGE="${{ needs.build-and-push.outputs.image }}"
+          IMAGE="$ACR_LOGIN_SERVER/$IMAGE_NAME:failure-test-${{ github.sha }}"
 
           echo "Waiting for revision using image:"
           echo "$IMAGE"
