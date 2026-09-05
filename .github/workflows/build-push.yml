@@ -16,7 +16,7 @@ concurrency:
 
 env:
   ACR_LOGIN_SERVER: nandaacrarrowheadaca.azurecr.io
-  ACR_NAME: nandaacrararrowheadaca
+  ACR_NAME: nandaacrarrowheadaca
   IMAGE_NAME: pureota
 
   RESOURCE_GROUP: NANDA-rg-arrowhead-aca-test
