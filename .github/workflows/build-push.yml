@@ -422,8 +422,8 @@ jobs:
       # ----------------------------------------------------------
 
       - name: Update ACA Job image
+        shell: bash
         run: |
-
           IMAGE="${{ needs.deploy.outputs.image }}"
 
           echo "Updating ACA Job to:"
@@ -432,9 +432,7 @@ jobs:
           az containerapp job update \
             --name "$CONTAINER_APP_JOB_NAME" \
             --resource-group "$RESOURCE_GROUP" \
-            --image "$IMAGE" \
-            --registry-server "$ACR_LOGIN_SERVER" \
-            --registry-identity "$PUREOTA_JOB_IDENTITY_RESOURCE_ID"
+            --image "$IMAGE"
 
           echo "ACA Job image updated."
 
