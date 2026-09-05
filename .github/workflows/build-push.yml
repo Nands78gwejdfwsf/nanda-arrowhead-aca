@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
@@ -17,16 +16,14 @@ concurrency:
 
 env:
   ACR_LOGIN_SERVER: nandaacrarrowheadaca.azurecr.io
-  ACR_NAME: nandaacrarrowheadaca
+  ACR_NAME: nandaacrararrowheadaca
   IMAGE_NAME: pureota
 
   RESOURCE_GROUP: NANDA-rg-arrowhead-aca-test
-
   CONTAINER_APP_NAME: nanda-ca-pureota
   CONTAINER_APP_JOB_NAME: nanda-job-pureota
 
   PUREOTA_JOB_IDENTITY_RESOURCE_ID: /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/NANDA-rg-arrowhead-aca-test/providers/Microsoft.ManagedIdentity/userAssignedIdentities/NANDA-id-pureota
-
 
 jobs:
 
@@ -46,7 +43,6 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-
       - name: Azure login with OIDC
         uses: azure/login@v2
         with:
@@ -54,14 +50,14 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-
       - name: Login to Azure Container Registry
+        shell: bash
         run: |
           az acr login \
             --name "$ACR_NAME"
 
-
       - name: Build Docker image
+        shell: bash
         run: |
           IMAGE="$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
 
@@ -72,8 +68,8 @@ jobs:
             -t "$IMAGE" \
             .
 
-
       - name: Push Docker image
+        shell: bash
         run: |
           IMAGE="$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
 
@@ -82,8 +78,8 @@ jobs:
 
           docker push "$IMAGE"
 
-
       - name: Verify image exists in ACR
+        shell: bash
         run: |
           echo "Verifying immutable image in ACR..."
 
@@ -94,9 +90,9 @@ jobs:
 
           echo "Image verified in ACR."
 
-
       - name: Record immutable image
         id: image
+        shell: bash
         run: |
           IMAGE="$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
 
@@ -104,7 +100,6 @@ jobs:
           echo "$IMAGE"
 
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-
 
 
   # ============================================================
@@ -132,7 +127,6 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-
       # ----------------------------------------------------------
       # Capture currently serving revision
       # ----------------------------------------------------------
@@ -141,7 +135,6 @@ jobs:
         id: current
         shell: bash
         run: |
-
           CURRENT_REVISION=$(az containerapp revision list \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$RESOURCE_GROUP" \
@@ -159,15 +152,13 @@ jobs:
 
           echo "current_revision=$CURRENT_REVISION" >> "$GITHUB_OUTPUT"
 
-
-
       # ----------------------------------------------------------
       # Deploy immutable SHA image
       # ----------------------------------------------------------
 
       - name: Deploy SHA image
+        shell: bash
         run: |
-
           IMAGE="${{ needs.build-and-push.outputs.image }}"
 
           echo "Deploying image:"
@@ -178,8 +169,6 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --image "$IMAGE"
 
-
-
       # ----------------------------------------------------------
       # Wait for new revision
       # ----------------------------------------------------------
@@ -188,7 +177,6 @@ jobs:
         id: revision
         shell: bash
         run: |
-
           IMAGE="${{ needs.build-and-push.outputs.image }}"
 
           echo "Waiting for revision using image:"
@@ -204,26 +192,19 @@ jobs:
               -o tsv)
 
             if [ -n "$REVISION" ]; then
-
               echo "New revision found:"
               echo "$REVISION"
 
               echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
-
               exit 0
             fi
 
             echo "Waiting for new revision... attempt $i/30"
-
             sleep 10
-
           done
 
           echo "ERROR: New revision was not created within the timeout."
-
           exit 1
-
-
 
       # ----------------------------------------------------------
       # Keep production traffic on existing revision
@@ -232,7 +213,6 @@ jobs:
       - name: Hold traffic on current revision
         shell: bash
         run: |
-
           CURRENT_REVISION="${{ steps.current.outputs.current_revision }}"
           NEW_REVISION="${{ steps.revision.outputs.revision }}"
 
@@ -243,15 +223,11 @@ jobs:
           echo "$NEW_REVISION"
 
           if [ "$CURRENT_REVISION" = "$NEW_REVISION" ]; then
-
             echo "ERROR: Current revision and new revision are identical."
-
             exit 1
-
           fi
 
           echo "Keeping current revision at 100% traffic."
-
           echo "Setting new revision to 0% traffic."
 
           az containerapp ingress traffic set \
@@ -264,8 +240,6 @@ jobs:
           echo "Production traffic remains on:"
           echo "$CURRENT_REVISION"
 
-
-
       # ----------------------------------------------------------
       # Health check new revision
       # ----------------------------------------------------------
@@ -274,7 +248,6 @@ jobs:
         id: health
         shell: bash
         run: |
-
           REVISION="${{ steps.revision.outputs.revision }}"
 
           echo "Checking revision:"
@@ -294,15 +267,10 @@ jobs:
             EXIT_CODE=$?
 
             if [ $EXIT_CODE -ne 0 ]; then
-
               echo "Azure API returned an error. Retrying..."
-
               cat /tmp/aca-health-error
-
               sleep 10
-
               continue
-
             fi
 
             RUNNING_STATE=$(echo "$RESULT" | jq -r '.runningState // "None"')
@@ -313,55 +281,34 @@ jobs:
             echo "Running state:      $RUNNING_STATE"
             echo "Health state:       $HEALTH_STATE"
 
-
             if [ "$PROVISIONING_STATE" = "Failed" ]; then
-
               echo "ERROR: Revision provisioning failed."
-
               exit 1
-
             fi
-
 
             if [ "$RUNNING_STATE" = "Failed" ]; then
-
               echo "ERROR: Revision running state is Failed."
-
               exit 1
-
             fi
-
 
             if [ "$RUNNING_STATE" = "RunningAtMaxScale" ] && \
                [ "$HEALTH_STATE" = "Healthy" ]; then
-
               echo "Revision is healthy and ready for approval."
-
               exit 0
-
             fi
-
 
             if [ "$RUNNING_STATE" = "Running" ] && \
                [ "$HEALTH_STATE" = "Healthy" ]; then
-
               echo "Revision is healthy and ready for approval."
-
               exit 0
-
             fi
 
-
             echo "Revision is not ready yet."
-
             sleep 10
-
           done
 
           echo "ERROR: Revision did not become healthy within the timeout."
-
           exit 1
-
 
 
   # ============================================================
@@ -370,6 +317,7 @@ jobs:
 
   production-validation:
     name: Approve Production Deployment
+
     needs:
       - deploy
 
@@ -381,6 +329,7 @@ jobs:
     steps:
 
       - name: Approval received
+        shell: bash
         run: |
           echo "Production approval received."
 
@@ -391,13 +340,13 @@ jobs:
           echo "${{ needs.deploy.outputs.image }}"
 
 
-
   # ============================================================
   # RUN ACA JOB USING SAME SHA
   # ============================================================
 
   run-job:
     name: Run PureOTA ACA Job
+
     needs:
       - deploy
       - production-validation
@@ -416,110 +365,92 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-
       # ----------------------------------------------------------
-      # Update Job to exact same immutable SHA
+      # Get existing Job template
       # ----------------------------------------------------------
 
-      - name: Update ACA Job image
+      - name: Prepare ACA Job template with deployed SHA
         shell: bash
         run: |
           IMAGE="${{ needs.deploy.outputs.image }}"
 
-          JOB_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/jobs/${CONTAINER_APP_JOB_NAME}"
+          echo "Getting existing ACA Job template..."
 
-          JOB_URL="https://management.azure.com${JOB_ID}?api-version=2025-01-01"
-
-          echo "Reading ACA Job:"
-          echo "$JOB_ID"
-
-          JOB_JSON=$(az rest \
-            --method get \
-            --url "$JOB_URL")
-
-          echo "Updating ACA Job image to:"
-          echo "$IMAGE"
-
-          UPDATED_BODY=$(echo "$JOB_JSON" | jq \
-            --arg image "$IMAGE" \
-            '.properties.template.containers[0].image = $image |
-             {properties: .properties}')
-
-          az rest \
-            --method patch \
-            --url "$JOB_URL" \
-            --headers "Content-Type=application/json" \
-            --body "$UPDATED_BODY" \
-            --output none
-
-          echo "ACA Job image updated successfully."
-
-
-      # ----------------------------------------------------------
-      # Verify Job image
-      # ----------------------------------------------------------
-
-      - name: Verify ACA Job image
-        run: |
-
-          EXPECTED_IMAGE="${{ needs.deploy.outputs.image }}"
-
-          ACTUAL_IMAGE=$(az containerapp job show \
+          az containerapp job show \
             --name "$CONTAINER_APP_JOB_NAME" \
             --resource-group "$RESOURCE_GROUP" \
-            --query "properties.template.containers[0].image" \
-            -o tsv)
+            --query "properties.template" \
+            --output yaml > job-template.yaml
 
-          echo "Expected image:"
-          echo "$EXPECTED_IMAGE"
-
-          echo "Actual Job image:"
-          echo "$ACTUAL_IMAGE"
-
-          if [ "$ACTUAL_IMAGE" != "$EXPECTED_IMAGE" ]; then
-
-            echo "ERROR: ACA Job image does not match deployed SHA."
-
+          if [ ! -s job-template.yaml ]; then
+            echo "ERROR: ACA Job template could not be retrieved."
             exit 1
-
           fi
 
-          echo "ACA Job image matches deployed SHA."
+          echo "Updating Job template image to:"
+          echo "$IMAGE"
 
+          python3 - "$IMAGE" <<'PY'
+          import sys
 
+          image = sys.argv[1]
+          path = "job-template.yaml"
+
+          with open(path, "r", encoding="utf-8") as f:
+              lines = f.readlines()
+
+          replaced = False
+
+          for i, line in enumerate(lines):
+              stripped = line.lstrip()
+
+              if stripped.startswith("image:") and not replaced:
+                  indent = line[:len(line) - len(stripped)]
+                  lines[i] = f"{indent}image: {image}\n"
+                  replaced = True
+
+          if not replaced:
+              raise SystemExit("ERROR: No container image was found in the Job template.")
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.writelines(lines)
+
+          print("Job template updated successfully.")
+          PY
+
+          echo "Final Job template:"
+          cat job-template.yaml
 
       # ----------------------------------------------------------
-      # Start Job from GitHub Actions
+      # Start Job using exact immutable SHA
       # ----------------------------------------------------------
 
       - name: Start ACA Job
         id: start-job
         shell: bash
         run: |
+          IMAGE="${{ needs.deploy.outputs.image }}"
 
-          echo "Starting ACA Job..."
+          echo "Starting ACA Job with immutable image:"
+          echo "$IMAGE"
 
           EXECUTION=$(az containerapp job start \
             --name "$CONTAINER_APP_JOB_NAME" \
             --resource-group "$RESOURCE_GROUP" \
+            --yaml job-template.yaml \
             --registry-identity "$PUREOTA_JOB_IDENTITY_RESOURCE_ID" \
             --query "name" \
             -o tsv)
 
           if [ -z "$EXECUTION" ]; then
-
             echo "ERROR: Azure did not return a Job execution name."
-
             exit 1
-
           fi
 
           echo "Job execution:"
           echo "$EXECUTION"
 
           echo "execution=$EXECUTION" >> "$GITHUB_OUTPUT"
-
-
 
       # ----------------------------------------------------------
       # Wait for Job completion
@@ -528,7 +459,6 @@ jobs:
       - name: Wait for ACA Job execution
         shell: bash
         run: |
-
           EXECUTION="${{ steps.start-job.outputs.execution }}"
 
           echo "Waiting for Job execution:"
@@ -549,43 +479,33 @@ jobs:
             case "$STATUS" in
 
               Succeeded)
-
                 echo "ACA Job completed successfully."
-
                 exit 0
                 ;;
 
               Failed)
-
                 echo "ERROR: ACA Job execution failed."
-
                 exit 1
                 ;;
 
               *)
-
                 echo "Job is still running."
-
                 sleep 10
                 ;;
 
             esac
-
           done
 
           echo "ERROR: ACA Job did not complete within the timeout."
-
           exit 1
-
-
 
       # ----------------------------------------------------------
       # Verify Job execution
       # ----------------------------------------------------------
 
       - name: Verify ACA Job execution
+        shell: bash
         run: |
-
           EXECUTION="${{ steps.start-job.outputs.execution }}"
 
           az containerapp job execution show \
@@ -596,13 +516,13 @@ jobs:
             -o table
 
 
-
   # ============================================================
   # PROMOTE APPROVED + VALIDATED REVISION
   # ============================================================
 
   promote:
     name: Promote PureOTA Revision
+
     needs:
       - deploy
       - production-validation
@@ -619,14 +539,13 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-
       # ----------------------------------------------------------
       # Shift traffic
       # ----------------------------------------------------------
 
       - name: Shift traffic to approved revision
+        shell: bash
         run: |
-
           REVISION="${{ needs.deploy.outputs.revision }}"
 
           echo "Approved and validated revision:"
@@ -641,23 +560,19 @@ jobs:
 
           echo "Traffic successfully shifted."
 
-
-
       # ----------------------------------------------------------
       # Verify traffic
       # ----------------------------------------------------------
 
       - name: Verify traffic
+        shell: bash
         run: |
-
           echo "Current Container App traffic allocation:"
 
           az containerapp ingress traffic show \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --output table
-
-
 
       # ----------------------------------------------------------
       # Verify promoted revision
@@ -666,7 +581,6 @@ jobs:
       - name: Verify promoted revision
         shell: bash
         run: |
-
           EXPECTED_REVISION="${{ needs.deploy.outputs.revision }}"
 
           ACTUAL_REVISION=$(az containerapp revision list \
@@ -683,24 +597,19 @@ jobs:
           echo "$ACTUAL_REVISION"
 
           if [ "$ACTUAL_REVISION" != "$EXPECTED_REVISION" ]; then
-
             echo "ERROR: Expected revision is not serving 100% traffic."
-
             exit 1
-
           fi
 
           echo "Production revision verified."
-
-
 
       # ----------------------------------------------------------
       # Final deployment summary
       # ----------------------------------------------------------
 
       - name: Deployment summary
+        shell: bash
         run: |
-
           echo "=============================================="
           echo "PureOTA deployment completed successfully"
           echo "=============================================="
