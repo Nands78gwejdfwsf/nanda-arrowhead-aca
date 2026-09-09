@@ -3,6 +3,7 @@ name: ACA Multi-App CI-CD
 on:
   push:
     branches: [main]
+
   workflow_dispatch:
     inputs:
       application:
@@ -10,7 +11,10 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, pureota, helixbridge]
+        options:
+          - all
+          - pureota
+          - helixbridge
 
 permissions:
   id-token: write
@@ -26,30 +30,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
+  # ============================================================
+  # DISCOVER APPLICATIONS
+  # ============================================================
   discover:
     name: Discover applications
     runs-on: ubuntu-latest
+
     outputs:
       matrix: ${{ steps.select.outputs.matrix }}
       resource_group: ${{ steps.platform.outputs.resource_group }}
       acr_name: ${{ steps.platform.outputs.acr_name }}
       acr_login_server: ${{ steps.platform.outputs.acr_login_server }}
+
     steps:
-      - uses: actions/checkout@v4
+
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Read platform configuration
         id: platform
         shell: bash
         run: |
           set -euo pipefail
+
           python3 <<'PY' >> "$GITHUB_OUTPUT"
           import json
-          c=json.load(open("platform.json", encoding="utf-8"))
-          print("resource_group=" + c["resourceGroupName"])
-          print("acr_name=" + c["acrName"])
-          print("acr_login_server=" + c["acrLoginServer"])
+
+          with open("platform.json", encoding="utf-8") as f:
+              config = json.load(f)
+
+          print("resource_group=" + config["resourceGroupName"])
+          print("acr_name=" + config["acrName"])
+          print("acr_login_server=" + config["acrLoginServer"])
           PY
 
       - name: Select changed applications
@@ -59,72 +75,181 @@ jobs:
           REQUESTED_APP: ${{ github.event.inputs.application || '' }}
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
+
         run: |
           set -euo pipefail
+
           python3 <<'PY'
-          import json, os, subprocess
-          cfg=json.load(open("apps/apps.json", encoding="utf-8"))["applications"]
-          requested=os.environ.get("REQUESTED_APP", "")
-          event=os.environ.get("EVENT_NAME", "")
-          before=os.environ.get("BEFORE_SHA", "")
-          sha=os.environ["GITHUB_SHA"]
+          import json
+          import os
+          import subprocess
+
+          with open("apps/apps.json", encoding="utf-8") as f:
+              cfg = json.load(f)["applications"]
+
+          requested = os.environ.get("REQUESTED_APP", "")
+          event = os.environ.get("EVENT_NAME", "")
+          before = os.environ.get("BEFORE_SHA", "")
+          sha = os.environ["GITHUB_SHA"]
+
+          # ----------------------------------------------------
+          # Manual deployment of one application
+          # ----------------------------------------------------
           if requested and requested != "all":
-              if requested not in cfg: raise SystemExit(f"Unknown application: {requested}")
-              selected=[requested]
+
+              if requested not in cfg:
+                  raise SystemExit(
+                      f"Unknown application: {requested}"
+                  )
+
+              selected = [requested]
+
+          # ----------------------------------------------------
+          # Manual deployment of all applications
+          # ----------------------------------------------------
           elif event == "workflow_dispatch":
-              selected=list(cfg)
-else:
-    # Handle normal pushes and a newly initialized/replaced repository.
-    # After a force-push or root commit, github.event.before may not exist
-    # in the current repository history. In that case deploy all apps.
-    before_exists = False
-    if before and before != "0" * 40:
-        result = subprocess.run(
-            ["git", "cat-file", "-e", f"{before}^{{commit}}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        before_exists = result.returncode == 0
 
-    if before_exists:
-        changed = subprocess.check_output(
-            ["git", "diff", "--name-only", before, sha],
-            text=True
-        ).splitlines()
-    else:
-        print("Previous commit is not available; treating this as a repository initialization and selecting all applications.")
-        changed = []
+              selected = list(cfg)
 
-    selected=[]
-    if not before_exists:
-        selected=list(cfg)
-    else:
-        for name, app in cfg.items():
-            prefix=app["buildContext"].rstrip("/")+"/"
-            if any(p.startswith(prefix) for p in changed):
-                selected.append(name)
+          # ----------------------------------------------------
+          # Normal push
+          # ----------------------------------------------------
+          else:
 
-        if "apps/apps.json" in changed or "platform.json" in changed:
-            selected=list(cfg)
-                  prefix=app["buildContext"].rstrip("/")+"/"
-                  if any(p.startswith(prefix) for p in changed): selected.append(name)
-              if "apps/apps.json" in changed or "platform.json" in changed: selected=list(cfg)
-          matrix={"include":[{"app":n,**cfg[n]} for n in dict.fromkeys(selected)]}
-          print(json.dumps(matrix,indent=2))
-          with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as f:
-              f.write("matrix="+json.dumps(matrix,separators=(",",":"))+"\n")
+              before_exists = False
+
+              if before and before != "0" * 40:
+
+                  result = subprocess.run(
+                      [
+                          "git",
+                          "cat-file",
+                          "-e",
+                          f"{before}^{{commit}}"
+                      ],
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+
+                  before_exists = result.returncode == 0
+
+              # ------------------------------------------------
+              # Previous commit exists
+              # ------------------------------------------------
+              if before_exists:
+
+                  changed = subprocess.check_output(
+                      [
+                          "git",
+                          "diff",
+                          "--name-only",
+                          before,
+                          sha
+                      ],
+                      text=True,
+                  ).splitlines()
+
+              # ------------------------------------------------
+              # Previous commit does not exist
+              # Example: repository was recreated / force pushed
+              # ------------------------------------------------
+              else:
+
+                  print(
+                      "Previous commit is not available; "
+                      "treating this as an initial repository deployment."
+                  )
+
+                  changed = []
+
+              # ------------------------------------------------
+              # Initial repository deployment
+              # ------------------------------------------------
+              if not before_exists:
+
+                  selected = list(cfg)
+
+              # ------------------------------------------------
+              # Normal incremental deployment
+              # ------------------------------------------------
+              else:
+
+                  selected = []
+
+                  for name, app in cfg.items():
+
+                      prefix = (
+                          app["buildContext"].rstrip("/") + "/"
+                      )
+
+                      if any(
+                          path.startswith(prefix)
+                          for path in changed
+                      ):
+                          selected.append(name)
+
+                  # Shared configuration changes
+                  # trigger both applications.
+                  if (
+                      "apps/apps.json" in changed
+                      or "platform.json" in changed
+                  ):
+                      selected = list(cfg)
+
+          # Remove duplicates while preserving order.
+          selected = list(dict.fromkeys(selected))
+
+          matrix = {
+              "include": [
+                  {
+                      "app": name,
+                      **cfg[name],
+                  }
+                  for name in selected
+              ]
+          }
+
+          print("Selected applications:")
+          print(json.dumps(matrix, indent=2))
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+              encoding="utf-8"
+          ) as f:
+
+              f.write(
+                  "matrix="
+                  + json.dumps(
+                      matrix,
+                      separators=(",", ":")
+                  )
+                  + "\n"
+              )
           PY
 
+
+  # ============================================================
+  # BUILD
+  # ============================================================
   build:
     name: Build ${{ matrix.displayName }}
+
     needs: discover
+
     if: ${{ needs.discover.outputs.matrix != '{"include":[]}' }}
+
     strategy:
       fail-fast: false
+
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Azure login with OIDC
         uses: azure/login@v2
@@ -136,27 +261,64 @@ else:
       - name: Login to ACR
         env:
           ACR_NAME: ${{ needs.discover.outputs.acr_name }}
-        run: az acr login --name "$ACR_NAME"
+
+        run: |
+          set -euo pipefail
+
+          az acr login \
+            --name "$ACR_NAME"
 
       - name: Build immutable SHA image
         env:
           ACR_LOGIN_SERVER: ${{ needs.discover.outputs.acr_login_server }}
+
         run: |
           set -euo pipefail
-          image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
-          docker build --file "${{ matrix.dockerfile }}" --tag "$image" "${{ matrix.buildContext }}"
-          docker push "$image"
-          az acr repository show --name "${{ needs.discover.outputs.acr_name }}" --image "${{ matrix.imageName }}:${GITHUB_SHA}" --output none
 
+          image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
+
+          echo "Building image:"
+          echo "$image"
+
+          docker build \
+            --file "${{ matrix.dockerfile }}" \
+            --tag "$image" \
+            "${{ matrix.buildContext }}"
+
+          docker push "$image"
+
+          az acr repository show \
+            --name "${{ needs.discover.outputs.acr_name }}" \
+            --image "${{ matrix.imageName }}:${GITHUB_SHA}" \
+            --output none
+
+          echo "Immutable SHA image pushed successfully."
+
+
+  # ============================================================
+  # DEPLOY
+  # ============================================================
   deploy:
     name: Deploy ${{ matrix.displayName }}
-    needs: [discover, build]
+
+    needs:
+      - discover
+      - build
+
+    if: ${{ needs.discover.outputs.matrix != '{"include":[]}' }}
+
     strategy:
       fail-fast: false
+
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Azure login with OIDC
         uses: azure/login@v2
         with:
@@ -164,186 +326,497 @@ else:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # --------------------------------------------------------
+      # Capture currently serving revision
+      # --------------------------------------------------------
       - name: Capture current serving revision
         id: current
+
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
+
         run: |
           set -euo pipefail
-          current=$(az containerapp revision list -n "${{ matrix.containerAppName }}" -g "$RESOURCE_GROUP" --all --query "[?properties.trafficWeight > \`0\`].name | [0]" -o tsv)
+
+          current=$(az containerapp revision list \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --all \
+            --query "[?properties.trafficWeight > \`0\`].name | [0]" \
+            --output tsv)
+
           if [[ -z "$current" ]]; then
-            echo "No existing serving revision was found. This is not expected after the foundation deployment."
+
+            echo "No existing serving revision was found."
+
             exit 1
+
           fi
+
+          echo "Current serving revision:"
+          echo "$current"
+
           echo "current=$current" >> "$GITHUB_OUTPUT"
 
+
+      # --------------------------------------------------------
+      # Deploy new immutable revision
+      # --------------------------------------------------------
       - name: Deploy immutable image as a new internal revision
+
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
           ACR_LOGIN_SERVER: ${{ needs.discover.outputs.acr_login_server }}
+
         run: |
           set -euo pipefail
+
           image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
+
+          echo "Deploying image:"
+          echo "$image"
+
           az containerapp update \
-            -n "${{ matrix.containerAppName }}" \
-            -g "$RESOURCE_GROUP" \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
             --image "$image" \
             --revision-suffix "${GITHUB_SHA:0:12}"
+
           az containerapp ingress update \
-            -n "${{ matrix.containerAppName }}" \
-            -g "$RESOURCE_GROUP" \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
             --type internal \
             --target-port "${{ matrix.targetPort }}" \
             --transport auto
 
+
+      # --------------------------------------------------------
+      # Find new revision
+      # --------------------------------------------------------
       - name: Find new revision
         id: revision
+
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
           ACR_LOGIN_SERVER: ${{ needs.discover.outputs.acr_login_server }}
+
         run: |
           set -euo pipefail
+
           image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
+
           for i in {1..30}; do
-            rev=$(az containerapp revision list -n "${{ matrix.containerAppName }}" -g "$RESOURCE_GROUP" --all --query "[?properties.template.containers[0].image=='$image'].name | [0]" -o tsv)
-            if [[ -n "$rev" ]]; then echo "revision=$rev" >> "$GITHUB_OUTPUT"; exit 0; fi
+
+            rev=$(az containerapp revision list \
+              --name "${{ matrix.containerAppName }}" \
+              --resource-group "$RESOURCE_GROUP" \
+              --all \
+              --query "[?properties.template.containers[0].image=='$image'].name | [0]" \
+              --output tsv)
+
+            if [[ -n "$rev" ]]; then
+
+              echo "New revision:"
+              echo "$rev"
+
+              echo "revision=$rev" >> "$GITHUB_OUTPUT"
+
+              exit 0
+
+            fi
+
             sleep 10
+
           done
+
+          echo "Unable to find the new revision."
+
           exit 1
 
+
+      # --------------------------------------------------------
+      # Keep old revision serving during validation
+      # --------------------------------------------------------
       - name: Keep old revision at 100 percent
-        env:
-          RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
-        run: |
-          set -euo pipefail
-          az containerapp ingress traffic set \
-            -n "${{ matrix.containerAppName }}" \
-            -g "$RESOURCE_GROUP" \
-            --revision-weight "${{ steps.current.outputs.current }}=100" "${{ steps.revision.outputs.revision }}=0"
 
-      - name: Health gate on new revision
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
+
         run: |
           set -euo pipefail
+
+          az containerapp ingress traffic set \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --revision-weight \
+              "${{ steps.current.outputs.current }}=100" \
+              "${{ steps.revision.outputs.revision }}=0"
+
+
+      # --------------------------------------------------------
+      # Health gate
+      # --------------------------------------------------------
+      - name: Health gate on new revision
+
+        id: health
+
+        env:
+          RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
+
+        run: |
+          set -euo pipefail
+
           revision="${{ steps.revision.outputs.revision }}"
+
+          echo "Checking revision:"
+          echo "$revision"
+
           for i in {1..36}; do
-            status=$(az containerapp revision show -n "${{ matrix.containerAppName }}" -g "$RESOURCE_GROUP" --revision "$revision" --query '{health:properties.healthState,running:properties.runningState,provisioning:properties.provisioningState}' -o json)
+
+            status=$(az containerapp revision show \
+              --name "${{ matrix.containerAppName }}" \
+              --resource-group "$RESOURCE_GROUP" \
+              --revision "$revision" \
+              --query '{health:properties.healthState,running:properties.runningState,provisioning:properties.provisioningState}' \
+              --output json)
+
             echo "$status"
+
             health=$(jq -r '.health // ""' <<< "$status")
+
             running=$(jq -r '.running // ""' <<< "$status")
+
             provisioning=$(jq -r '.provisioning // ""' <<< "$status")
-            if [[ "$provisioning" == "Failed" || "$running" == "Failed" ]]; then exit 1; fi
-            if [[ "$health" == "Healthy" && ("$running" == "Running" || "$running" == "RunningAtMaxScale") ]]; then exit 0; fi
+
+            if [[ "$provisioning" == "Failed" ||
+                  "$running" == "Failed" ]]; then
+
+              echo "New revision entered a failed state."
+
+              exit 1
+
+            fi
+
+            if [[ "$health" == "Healthy" &&
+                  ( "$running" == "Running" ||
+                    "$running" == "RunningAtMaxScale" ) ]]; then
+
+              echo "New revision is healthy."
+
+              exit 0
+
+            fi
+
             sleep 10
+
           done
-          echo 'New revision did not become healthy.'
+
+          echo "New revision did not become healthy."
+
           exit 1
 
+
+      # --------------------------------------------------------
+      # Automatic rollback
+      # --------------------------------------------------------
+      - name: Roll back to previous revision if deployment fails
+
+        if: ${{ failure() && steps.current.outputs.current != '' }}
+
+        env:
+          RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
+
+        run: |
+          set -euo pipefail
+
+          echo "Deployment/health validation failed."
+
+          echo "Rolling back to:"
+          echo "${{ steps.current.outputs.current }}"
+
+          az containerapp ingress traffic set \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --revision-weight \
+              "${{ steps.current.outputs.current }}=100"
+
+          echo "Rollback completed."
+
+
+  # ============================================================
+  # PRODUCTION APPROVAL
+  # ============================================================
   approval:
     name: Production approval
+
     needs: deploy
+
+    if: ${{ needs.deploy.result == 'success' }}
+
     runs-on: ubuntu-latest
+
     environment:
       name: production
-    steps:
-      - run: echo 'Production approval received.'
 
+    steps:
+
+      - name: Production approval received
+        run: |
+          echo "Production approval received."
+
+
+  # ============================================================
+  # RUN ACA JOB
+  # ============================================================
   run-job:
     name: Run ${{ matrix.displayName }} Job
-    needs: [discover, deploy, approval]
+
+    needs:
+      - discover
+      - deploy
+      - approval
+
+    if: >-
+      ${{
+        needs.deploy.result == 'success' &&
+        needs.approval.result == 'success' &&
+        needs.discover.outputs.matrix != '{"include":[]}'
+      }}
+
     strategy:
       fail-fast: false
+
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
     runs-on: ubuntu-latest
+
     steps:
+
       - name: Skip when no Job is configured
+
         if: ${{ !matrix.jobEnabled }}
-        run: echo 'No ACA Job configured.'
+
+        run: |
+          echo "No ACA Job configured."
+
 
       - name: Azure login with OIDC
+
         if: ${{ matrix.jobEnabled }}
+
         uses: azure/login@v2
+
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
 
       - name: Update Job to immutable SHA and start it
+
         if: ${{ matrix.jobEnabled }}
+
         id: start
+
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
           ACR_LOGIN_SERVER: ${{ needs.discover.outputs.acr_login_server }}
+
         shell: bash
+
         run: |
           set -euo pipefail
+
           image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
-          az containerapp job update -n "${{ matrix.jobName }}" -g "$RESOURCE_GROUP" --image "$image"
-          execution=$(az containerapp job start -n "${{ matrix.jobName }}" -g "$RESOURCE_GROUP" --query name -o tsv)
+
+          az containerapp job update \
+            --name "${{ matrix.jobName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$image"
+
+          execution=$(az containerapp job start \
+            --name "${{ matrix.jobName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query name \
+            --output tsv)
+
           echo "execution=$execution" >> "$GITHUB_OUTPUT"
 
+
       - name: Wait for Job completion
+
         if: ${{ matrix.jobEnabled }}
+
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
+
         run: |
           set -euo pipefail
+
           for i in {1..36}; do
-            status=$(az containerapp job execution show -n "${{ matrix.jobName }}" -g "$RESOURCE_GROUP" --job-execution-name "${{ steps.start.outputs.execution }}" --query properties.status -o tsv)
+
+            status=$(az containerapp job execution show \
+              --name "${{ matrix.jobName }}" \
+              --resource-group "$RESOURCE_GROUP" \
+              --job-execution-name "${{ steps.start.outputs.execution }}" \
+              --query properties.status \
+              --output tsv)
+
             echo "Job status: $status"
+
             case "$status" in
-              Succeeded) exit 0 ;;
-              Failed|Canceled) exit 1 ;;
+
+              Succeeded)
+                exit 0
+                ;;
+
+              Failed|Canceled)
+                exit 1
+                ;;
+
             esac
+
             sleep 10
+
           done
+
+          echo "Job did not complete within the timeout."
+
           exit 1
 
+
+  # ============================================================
+  # PROMOTE
+  # ============================================================
   promote:
     name: Promote ${{ matrix.displayName }}
-    needs: [discover, deploy, approval, run-job]
-    if: ${{ always() && needs.deploy.result == 'success' && needs.approval.result == 'success' && needs.run-job.result == 'success' }}
+
+    needs:
+      - discover
+      - deploy
+      - approval
+      - run-job
+
+    if: >-
+      ${{
+        always() &&
+        needs.deploy.result == 'success' &&
+        needs.approval.result == 'success' &&
+        needs.run-job.result == 'success' &&
+        needs.discover.outputs.matrix != '{"include":[]}'
+      }}
+
     strategy:
       fail-fast: false
+
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
       - name: Azure login with OIDC
         uses: azure/login@v2
+
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+
       - name: Promote validated revision
+
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
           ACR_LOGIN_SERVER: ${{ needs.discover.outputs.acr_login_server }}
+
         run: |
           set -euo pipefail
-          image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
-          revision=$(az containerapp revision list -n "${{ matrix.containerAppName }}" -g "$RESOURCE_GROUP" --all --query "[?properties.template.containers[0].image=='$image'].name | [0]" -o tsv)
-          if [[ -z "$revision" ]]; then exit 1; fi
-          az containerapp ingress traffic set -n "${{ matrix.containerAppName }}" -g "$RESOURCE_GROUP" --revision-weight "$revision=100"
-          actual=$(az containerapp revision list -n "${{ matrix.containerAppName }}" -g "$RESOURCE_GROUP" --all --query "[?properties.trafficWeight == \`100\`].name | [0]" -o tsv)
-          [[ "$actual" == "$revision" ]]
 
+          image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
+
+          revision=$(az containerapp revision list \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --all \
+            --query "[?properties.template.containers[0].image=='$image'].name | [0]" \
+            --output tsv)
+
+          if [[ -z "$revision" ]]; then
+
+            echo "Validated revision was not found."
+
+            exit 1
+
+          fi
+
+          echo "Promoting revision:"
+          echo "$revision"
+
+          az containerapp ingress traffic set \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --revision-weight "$revision=100"
+
+          actual=$(az containerapp revision list \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --all \
+            --query "[?properties.trafficWeight == \`100\`].name | [0]" \
+            --output tsv)
+
+          if [[ "$actual" != "$revision" ]]; then
+
+            echo "Traffic validation failed."
+
+            echo "Expected: $revision"
+
+            echo "Actual: $actual"
+
+            exit 1
+
+          fi
+
+          echo "Revision successfully promoted to 100% traffic."
+
+
+  # ============================================================
+  # FAILURE NOTIFICATION
+  # ============================================================
   notify:
     name: CI/CD failure notification
-    needs: [discover, build, deploy, approval, run-job, promote]
+
+    needs:
+      - discover
+      - build
+      - deploy
+      - approval
+      - run-job
+      - promote
+
     if: ${{ always() && contains(needs.*.result, 'failure') }}
+
     runs-on: ubuntu-latest
+
     steps:
+
       - name: Create GitHub failure notification
+
         env:
           GH_TOKEN: ${{ github.token }}
           TITLE: ACA CI/CD failure - ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
         shell: bash
+
         run: |
           set -euo pipefail
+
           body=$(cat <<EOF2
           ACA CI/CD deployment failed.
 
@@ -355,7 +828,12 @@ else:
           Review the failed GitHub Actions jobs before retrying or rolling back.
           EOF2
           )
-          payload=$(jq -n --arg title "$TITLE" --arg body "$body" '{title:$title,body:$body}')
+
+          payload=$(jq -n \
+            --arg title "$TITLE" \
+            --arg body "$body" \
+            '{title:$title,body:$body}')
+
           curl -fsSL -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
