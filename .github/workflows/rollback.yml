@@ -1,0 +1,126 @@
+name: ACA Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      application:
+        description: Application to roll back
+        required: true
+        type: choice
+        options: [pureota, helixbridge]
+      commit_sha:
+        description: Full Git commit SHA to roll back to
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: aca-rollback
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback ${{ inputs.application }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read configuration
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          app=json.load(open('apps/apps.json',encoding='utf-8'))['applications']["${{ inputs.application }}"]
+          print('containerAppName='+app['containerAppName'])
+          print('imageName='+app['imageName'])
+          PY
+          python3 <<'PY' >> "$GITHUB_ENV"
+          import json
+          c=json.load(open('platform.json',encoding='utf-8'))
+          print('RESOURCE_GROUP='+c['resourceGroupName'])
+          print('ACR_LOGIN_SERVER='+c['acrLoginServer'])
+          PY
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify target image exists
+        run: |
+          set -euo pipefail
+          az acr repository show --name "$(jq -r .acrName platform.json)" --image "${{ steps.config.outputs.imageName }}:${{ inputs.commit_sha }}" --output none
+
+      - name: Verify target image revision exists
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$ACR_LOGIN_SERVER/${{ steps.config.outputs.imageName }}:${{ inputs.commit_sha }}"
+          revision=$(az containerapp revision list -n "${{ steps.config.outputs.containerAppName }}" -g "$RESOURCE_GROUP" --all --query "[?properties.template.containers[0].image=='$image'].name | [0]" -o tsv)
+          if [[ -z "$revision" ]]; then
+            echo "No revision exists for commit SHA ${{ inputs.commit_sha }}. Rollback is intentionally refused."
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Validate target revision
+        run: |
+          set -euo pipefail
+          for i in {1..30}; do
+            json=$(az containerapp revision show -n "${{ steps.config.outputs.containerAppName }}" -g "$RESOURCE_GROUP" --revision "${{ steps.target.outputs.revision }}" --query '{health:properties.healthState,running:properties.runningState,provisioning:properties.provisioningState}' -o json)
+            echo "$json"
+            h=$(jq -r .health <<< "$json")
+            r=$(jq -r .running <<< "$json")
+            p=$(jq -r .provisioning <<< "$json")
+            if [[ "$p" == Failed || "$r" == Failed ]]; then exit 1; fi
+            if [[ "$h" == Healthy && ("$r" == Running || "$r" == RunningAtMaxScale) ]]; then exit 0; fi
+            sleep 10
+          done
+          exit 1
+
+      - name: Promote rollback revision
+        run: |
+          set -euo pipefail
+          az containerapp ingress traffic set \
+            -n "${{ steps.config.outputs.containerAppName }}" \
+            -g "$RESOURCE_GROUP" \
+            --revision-weight "${{ steps.target.outputs.revision }}=100"
+
+      - name: Verify rollback
+        run: |
+          set -euo pipefail
+          actual=$(az containerapp revision list -n "${{ steps.config.outputs.containerAppName }}" -g "$RESOURCE_GROUP" --all --query "[?properties.trafficWeight == \`100\`].name | [0]" -o tsv)
+          [[ "$actual" == "${{ steps.target.outputs.revision }}" ]]
+
+  notify:
+    name: Rollback failure notification
+    needs: rollback
+    if: ${{ always() && needs.rollback.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create GitHub failure notification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          payload=$(jq -n \
+            --arg title "ACA rollback failed - ${{ inputs.application }} - ${{ inputs.commit_sha }}" \
+            --arg body "Rollback failed. Review the workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{title:$title,body:$body}')
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$REPOSITORY/issues" \
+            -d "$payload"

@@ -1,0 +1,30 @@
+{
+  "applications": {
+    "pureota": {
+      "displayName": "PureOTA",
+      "containerAppName": "nanda-ca-pureota",
+      "imageName": "pureota",
+      "buildContext": "apps/pureota",
+      "dockerfile": "apps/pureota/Dockerfile",
+      "targetPort": 80,
+      "healthPath": "/healthz",
+      "minReplicas": 1,
+      "maxReplicas": 1,
+      "jobEnabled": true,
+      "jobName": "nanda-job-pureota"
+    },
+    "helixbridge": {
+      "displayName": "HelixBridge",
+      "containerAppName": "nanda-ca-helixbridge",
+      "imageName": "helixbridge",
+      "buildContext": "apps/helixbridge",
+      "dockerfile": "apps/helixbridge/Dockerfile",
+      "targetPort": 80,
+      "healthPath": "/healthz",
+      "minReplicas": 1,
+      "maxReplicas": 1,
+      "jobEnabled": false,
+      "jobName": ""
+    }
+  }
+}
