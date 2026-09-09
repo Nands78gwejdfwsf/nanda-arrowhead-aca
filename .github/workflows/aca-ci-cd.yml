@@ -73,10 +73,39 @@ jobs:
               selected=[requested]
           elif event == "workflow_dispatch":
               selected=list(cfg)
-          else:
-              changed=subprocess.check_output(["git","diff","--name-only",before,sha],text=True).splitlines() if before and before != "0"*40 else subprocess.check_output(["git","diff","--name-only","HEAD^","HEAD"],text=True).splitlines()
-              selected=[]
-              for name, app in cfg.items():
+else:
+    # Handle normal pushes and a newly initialized/replaced repository.
+    # After a force-push or root commit, github.event.before may not exist
+    # in the current repository history. In that case deploy all apps.
+    before_exists = False
+    if before and before != "0" * 40:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{before}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        before_exists = result.returncode == 0
+
+    if before_exists:
+        changed = subprocess.check_output(
+            ["git", "diff", "--name-only", before, sha],
+            text=True
+        ).splitlines()
+    else:
+        print("Previous commit is not available; treating this as a repository initialization and selecting all applications.")
+        changed = []
+
+    selected=[]
+    if not before_exists:
+        selected=list(cfg)
+    else:
+        for name, app in cfg.items():
+            prefix=app["buildContext"].rstrip("/")+"/"
+            if any(p.startswith(prefix) for p in changed):
+                selected.append(name)
+
+        if "apps/apps.json" in changed or "platform.json" in changed:
+            selected=list(cfg)
                   prefix=app["buildContext"].rstrip("/")+"/"
                   if any(p.startswith(prefix) for p in changed): selected.append(name)
               if "apps/apps.json" in changed or "platform.json" in changed: selected=list(cfg)
