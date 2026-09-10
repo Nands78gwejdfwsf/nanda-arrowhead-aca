@@ -1,0 +1,104 @@
+name: ACA Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      application:
+        description: Application to roll back
+        required: true
+        type: choice
+        options: [pureota, helixbridge]
+      commit_sha:
+        description: Full Git commit SHA to roll back to
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: aca-rollback
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback ${{ inputs.application }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read configuration
+        id: config
+        shell: bash
+            # --------------------------------------------------------
+      # Promote rollback revision to 100%
+      # --------------------------------------------------------
+      - name: Promote rollback revision
+
+        run: |
+          set -euo pipefail
+
+          revision="${{ steps.target.outputs.revision }}"
+
+          echo "Rolling back application:"
+          echo "${{ inputs.application }}"
+
+          echo "Target revision:"
+          echo "$revision"
+
+          app_id=$(az containerapp show \
+            --name "${{ steps.config.outputs.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query id \
+            --output tsv)
+
+          az rest \
+            --method PATCH \
+            --url "${app_id}?api-version=2025-07-01" \
+            --body "{\"properties\":{\"configuration\":{\"ingress\":{\"traffic\":[{\"revisionName\":\"$revision\",\"weight\":100}]}}}}" \
+            --headers Content-Type=application/json
+
+          actual=$(az containerapp revision list \
+            --name "${{ steps.config.outputs.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --all \
+            --query "[?properties.trafficWeight == \`100\`].name | [0]" \
+            --output tsv)
+
+          if [[ "$actual" != "$revision" ]]; then
+            echo "Rollback traffic validation failed."
+            echo "Expected: $revision"
+            echo "Actual: $actual"
+            exit 1
+          fi
+
+          echo "Rollback completed successfully."
+          echo "100% traffic is now on:"
+          echo "$revision"
+
+
+  notify:
+    name: Rollback failure notification
+    needs: rollback
+    if: ${{ always() && needs.rollback.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create GitHub failure notification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          payload=$(jq -n \
+            --arg title "ACA rollback failed - ${{ inputs.application }} - ${{ inputs.commit_sha }}" \
+            --arg body "Rollback failed. Review the workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{title:$title,body:$body}')
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$REPOSITORY/issues" \
+            -d "$payload"
