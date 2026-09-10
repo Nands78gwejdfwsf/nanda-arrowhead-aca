@@ -771,8 +771,28 @@ jobs:
             exit 1
           fi
 
-          echo "Promoting revision:"
+          echo "Validated revision:"
           echo "$revision"
+
+          current=$(az containerapp revision list \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --all \
+            --query "[?properties.trafficWeight > \`0\`].name | [0]" \
+            --output tsv)
+
+          if [[ -z "$current" ]]; then
+            echo "Current serving revision was not found."
+            exit 1
+          fi
+
+          echo "Current production revision:"
+          echo "$current"
+
+          if [[ "$current" == "$revision" ]]; then
+            echo "Validated revision is already serving 100% traffic."
+            exit 0
+          fi
 
           app_id=$(az containerapp show \
             --name "${{ matrix.containerAppName }}" \
@@ -780,27 +800,49 @@ jobs:
             --query id \
             --output tsv)
 
+          traffic=$(jq -n \
+            --arg current "$current" \
+            --arg revision "$revision" \
+            '[
+              {revisionName: $current, weight: 0},
+              {revisionName: $revision, weight: 100}
+            ]')
+
+          echo "Applying traffic configuration:"
+          echo "$traffic"
+
           az rest \
             --method PATCH \
-            --url "${app_id}?api-version=2025-01-01" \
-            --body "{\"properties\":{\"configuration\":{\"ingress\":{\"traffic\":[{\"revisionName\":\"$revision\",\"weight\":100}]}}}}" \
+            --url "${app_id}?api-version=2025-07-01" \
+            --body "{\"properties\":{\"configuration\":{\"ingress\":{\"traffic\":$traffic}}}}" \
             --headers Content-Type=application/json
 
-          actual=$(az containerapp revision list \
-            --name "${{ matrix.containerAppName }}" \
-            --resource-group "$RESOURCE_GROUP" \
-            --all \
-            --query "[?properties.trafficWeight == \`100\`].name | [0]" \
-            --output tsv)
+          echo "Waiting for traffic configuration to settle..."
 
-          if [[ "$actual" != "$revision" ]]; then
-            echo "Traffic validation failed."
-            echo "Expected: $revision"
-            echo "Actual: $actual"
-            exit 1
-          fi
+          for i in {1..12}; do
 
-          echo "Revision successfully promoted to 100% traffic."
+            target_weight=$(az containerapp revision show \
+              --name "${{ matrix.containerAppName }}" \
+              --resource-group "$RESOURCE_GROUP" \
+              --revision "$revision" \
+              --query properties.trafficWeight \
+              --output tsv)
+
+            echo "Target revision traffic: ${target_weight}%"
+
+            if [[ "$target_weight" == "100" ]]; then
+              echo "Revision successfully promoted to 100% traffic."
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "Traffic validation failed."
+          echo "Expected revision: $revision"
+          echo "Expected traffic: 100%"
+          echo "Actual target traffic: ${target_weight}%"
+          exit 1
 
 
 
