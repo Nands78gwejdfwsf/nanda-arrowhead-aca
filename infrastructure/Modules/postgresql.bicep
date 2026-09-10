@@ -6,12 +6,38 @@ param administratorLoginPassword string
 param storageSizeGB int = 32
 param backupRetentionDays int = 7
 
-// The PostgreSQL Flexible Server was successfully created during the foundation deployment.
-// Keep this module as an existing-resource reference so subsequent deployments are idempotent
-// and do not resend the server create/update request that returned the Azure control-plane
-// InternalServerError even though the server became Ready.
-resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' existing = {
+resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
   name: serverName
+  location: location
+  sku: {
+    name: 'Standard_B1ms'
+    tier: 'Burstable'
+  }
+  properties: {
+    administratorLogin: administratorLogin
+    administratorLoginPassword: administratorLoginPassword
+    version: '16'
+    backup: {
+      backupRetentionDays: backupRetentionDays
+      geoRedundantBackup: 'Disabled'
+    }
+    highAvailability: {
+      mode: 'Disabled'
+    }
+    storage: {
+      storageSizeGB: storageSizeGB
+      tier: 'P4'
+      autoGrow: 'Disabled'
+    }
+    authConfig: {
+      activeDirectoryAuth: 'Enabled'
+      passwordAuth: 'Enabled'
+      tenantId: subscription().tenantId
+    }
+    network: {
+      publicNetworkAccess: 'Disabled'
+    }
+  }
 }
 
 output id string = server.id

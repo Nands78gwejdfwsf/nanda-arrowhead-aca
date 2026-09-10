@@ -25,8 +25,8 @@
 | KV-9 | Private endpoint is optional until Arrowhead approves DNS/network design |
 | KV-10 | Break-glass procedure is documentation work for handoff |
 | KV-11 | deploy-lab.ps1 demonstrates .env-to-Key-Vault bootstrap pattern for platform secrets |
-| DATA-2..DATA-6 | Managed PostgreSQL with Entra auth, private access and backup retention |
-| DATA-7..DATA-10 | Private Azure Files share, persistent ACA mount and Azure Backup policy |
+| DATA-2..DATA-6 | Managed PostgreSQL with Entra auth, private access and backup retention; server is created by Bicep on clean rebuild |
+| DATA-7..DATA-10 | Private Azure Files share, persistent ACA mount and persistent Azure Files storage (file-share backup is not included in this POC deployment) |
 | DATA-11 | Dummy applications pinned to one replica in IaC |
 | DATA-12 | Dummy applications do not use session state |
 | AUTH-1..AUTH-4 | Easy Auth + dedicated group authorization implemented for both dummy apps |
@@ -39,7 +39,7 @@
 | NET-6 | Cato is intentionally deferred per POC instruction |
 | NET-7 | Caddy is not used by ACA applications |
 | NET-8 | Retained AZDKR01 workloads are outside this POC repository |
-| IAC-1..IAC-5 | Azure resources are defined in Bicep modules; secret values are populated separately by deploy-lab.ps1 |
+| IAC-1..IAC-5 | Azure resources are defined in Bicep modules; PostgreSQL is created by Bicep; secret values are populated separately by deploy-lab.ps1 |
 | OBS-1 | ACA and Key Vault logs flow to Log Analytics |
 | OBS-2 | Required alert categories are configured in monitoring.bicep |
 | OBS-3 | Log Analytics workspace is the operational log source |

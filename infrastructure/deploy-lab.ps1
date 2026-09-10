@@ -1,11 +1,11 @@
 <#!
 .SYNOPSIS
-Fresh, reusable deployment for the Arrowhead Container Apps POC platform.
+Fresh, reusable deployment for the Arrowhead Container Apps POC platform. Azure authentication uses Azure CLI only.
 
 .DESCRIPTION
 The script intentionally uses two Azure deployments:
   1. Foundation: network, Log Analytics, ACR, Key Vault, PostgreSQL, Azure Files,
-     private endpoints/DNS, ACA environment, backup vault/policy, Defender and GitHub OIDC identity.
+     private endpoints/DNS, ACA environment, Defender and GitHub OIDC identity.
   2. Runtime: after secrets and Entra configuration exist, deploys the two dummy reference apps,
      PureOTA ACA Job, Easy Auth, scoped Key Vault RBAC and Azure Monitor alerts.
 
@@ -16,7 +16,7 @@ The acceptance/validation script is intentionally not included in this POC packa
 [CmdletBinding()]
 param(
     [string]$Location = 'westus',
-    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca-test',
+    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca-test1',
     [string]$GithubRepository = 'Nands78gwejdfwsf/nanda-arrowhead-aca',
     [string]$NotificationEmail = 'Nandan.NK@Stratogent.com',
     [string]$EntraOperatorObjectId,
@@ -27,9 +27,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$MainBicep = Join-Path $Root 'main.bicep'
+$FoundationBicep = Join-Path $Root 'main.bicep'
+$RuntimeBicep = Join-Path $Root 'runtime.bicep'
 
-$KeyVaultName = 'NANDA-kv-aca-test15'
+$KeyVaultName = 'NANDA-kv-aca-test20'
 $StorageAccountName = 'nandastpureotaaca'
 $StorageKeySecretName = 'pureota-storage-key'
 $PureotaAuthSecretName = 'pureota-entra-client-secret'
@@ -47,6 +48,8 @@ $MonthlyBudgetAmount = 100
 $storageKey = $null
 $plainPassword = $null
 $PostgreSqlPassword = $null
+$operatorId = $null
+$githubRepositorySubjectPrefix = $null
 
 function Write-Step([string]$Message) {
     Write-Host "`n============================================================" -ForegroundColor Cyan
@@ -69,9 +72,15 @@ function Assert-AzCli {
 
 function Assert-BicepCompilation {
     Write-Step 'Validate Bicep before deployment'
-    az bicep build --file $MainBicep --stdout --only-show-errors | Out-Null
+
+    az bicep build --file $FoundationBicep --stdout --only-show-errors | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw 'Bicep compilation failed. No Azure resources were deployed.'
+        throw 'Foundation Bicep compilation failed. No Azure resources were deployed.'
+    }
+
+    az bicep build --file $RuntimeBicep --stdout --only-show-errors | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Runtime Bicep compilation failed. No Azure resources were deployed.'
     }
 }
 
@@ -81,6 +90,45 @@ function Assert-AzureLogin {
         throw 'Azure CLI is not logged in. Run az login first.'
     }
     return ($account | ConvertFrom-Json)
+}
+
+
+function Ensure-ResourceGroupForRecovery {
+    $exists = az group exists --name $ResourceGroupName --only-show-errors
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not determine whether the resource group exists.'
+    }
+
+    if ($exists -ne 'true') {
+        Write-Step 'Prepare Resource Group for recoverable resources'
+        az group create `
+            --name $ResourceGroupName `
+            --location $Location `
+            --only-show-errors `
+            --output none
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create resource group '$ResourceGroupName'."
+        }
+    }
+}
+
+
+function Get-GitHubRepositorySubjectPrefix {
+    Write-Step 'Set GitHub OIDC repository subject'
+
+    # GitHub Actions currently presents the immutable repository subject in this form:
+    # repo:OWNER@OWNER-ID/REPOSITORY@REPOSITORY-ID
+    # Keep these values as deployment inputs; GitHub CLI is not required.
+    $owner, $repository = $GithubRepository.Split('/', 2)
+
+    if ($owner -ne 'Nands78gwejdfwsf' -or $repository -ne 'nanda-arrowhead-aca') {
+        throw "This POC is configured for GitHub repository 'Nands78gwejdfwsf/nanda-arrowhead-aca'. Received '$GithubRepository'."
+    }
+
+    $prefix = 'Nands78gwejdfwsf@194785632/nanda-arrowhead-aca@1357384545'
+    Write-Host "GitHub OIDC subject prefix: repo:$prefix" -ForegroundColor Green
+    return $prefix
 }
 
 function Get-OperatorObjectId {
@@ -101,24 +149,42 @@ function Invoke-FoundationDeployment([string]$Password) {
 
     az deployment sub create `
         --location $Location `
-        --template-file $MainBicep `
+        --template-file $FoundationBicep `
         --parameters `
             resourceGroupName=$ResourceGroupName `
-            githubRepository=$GithubRepository `
+            githubRepositorySubjectPrefix=$githubRepositorySubjectPrefix `
             postgresqlAdministratorLoginPassword=$Password `
             notificationEmail=$NotificationEmail `
             monthlyBudgetAmount=$MonthlyBudgetAmount `
             budgetStartDate=$budgetStartDate `
-            deployRuntimeResources=false `
         --only-show-errors
 
     if ($LASTEXITCODE -ne 0) {
         throw 'Foundation Bicep deployment failed.'
     }
+
+    # PostgreSQL must be Ready before any runtime resource references it.
+    for ($attempt = 1; $attempt -le 36; $attempt++) {
+        $state = az postgres flexible-server show `
+            --resource-group $ResourceGroupName `
+            --name 'nanda-pg-aca-test' `
+            --query state `
+            -o tsv `
+            --only-show-errors 2>$null
+
+        if ($LASTEXITCODE -eq 0 -and $state -eq 'Ready') {
+            Write-Host 'PostgreSQL is Ready.' -ForegroundColor Green
+            return
+        }
+
+        Write-Host "Waiting for PostgreSQL to become Ready... attempt $attempt/36 (state=$state)" -ForegroundColor Yellow
+        Start-Sleep -Seconds 10
+    }
+
+    throw 'PostgreSQL did not reach Ready state after foundation deployment.'
 }
 
 function Invoke-RuntimeDeployment(
-    [string]$Password,
     [string]$PureotaGroupId,
     [string]$PureotaClientId,
     [string]$HelixGroupId,
@@ -127,23 +193,19 @@ function Invoke-RuntimeDeployment(
 ) {
     Write-Step 'PHASE 3 - Deploy Runtime and Monitoring'
 
-    az deployment sub create `
-        --location $Location `
-        --template-file $MainBicep `
+    az deployment group create `
+        --resource-group $ResourceGroupName `
+        --template-file $RuntimeBicep `
         --parameters `
+            location=$Location `
             resourceGroupName=$ResourceGroupName `
-            githubRepository=$GithubRepository `
-            postgresqlAdministratorLoginPassword=$Password `
-            notificationEmail=$NotificationEmail `
-            monthlyBudgetAmount=$MonthlyBudgetAmount `
-            budgetStartDate=$budgetStartDate `
-            deployRuntimeResources=true `
             pureotaEntraGroupObjectId=$PureotaGroupId `
             pureotaEntraClientId=$PureotaClientId `
             helixbridgeEntraGroupObjectId=$HelixGroupId `
             helixbridgeEntraClientId=$HelixClientId `
             postgresqlEntraAdministratorObjectId=$PostgresAdminGroupId `
             postgresqlEntraAdministratorName=$PostgresAdminGroupName `
+            notificationEmail=$NotificationEmail `
         --only-show-errors
 
     if ($LASTEXITCODE -ne 0) {
@@ -165,6 +227,12 @@ function Get-StorageKey {
 }
 
 function Ensure-KeyVaultSecret([string]$Name, [string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "Cannot write Key Vault secret '$Name' because the secret value is empty."
+    }
+
+    $Value = $Value.Trim()
+
     az keyvault secret set `
         --vault-name $KeyVaultName `
         --name $Name `
@@ -435,28 +503,38 @@ function Ensure-EntraApplication(
         -o tsv `
         --only-show-errors
 
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not check whether Key Vault secret '$SecretName' exists."
+    }
+
     if ([string]::IsNullOrWhiteSpace($existingSecret)) {
-        $credential = az ad app credential reset `
+        Write-Host "Key Vault secret '$SecretName' does not exist. Creating Entra client secret..." -ForegroundColor Yellow
+
+        $credentialPassword = az ad app credential reset `
             --id $clientId `
             --append `
             --display-name 'ACA-KeyVault' `
             --years 1 `
-            --only-show-errors `
-            --output json | ConvertFrom-Json
+            --query password `
+            --output tsv `
+            --only-show-errors
 
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($credential.password)) {
-            throw "Failed to create client secret for '$DisplayName'."
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($credentialPassword)) {
+            throw "Entra application '$DisplayName' did not return a client secret. Key Vault was not updated."
         }
 
-        Ensure-KeyVaultSecret -Name $SecretName -Value $credential.password
-        $credential = $null
+        Ensure-KeyVaultSecret -Name $SecretName -Value $credentialPassword
+        Write-Host "Key Vault secret '$SecretName' created successfully." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Key Vault secret '$SecretName' already exists. Reusing existing secret." -ForegroundColor Green
     }
 
     return $clientId.Trim()
 }
 
 function Remove-TemporaryKeyVaultOperatorAccess([string]$OperatorId) {
-    Write-Step 'PHASE 4 - Remove Temporary Key Vault Bootstrap Access'
+    Write-Step 'Key Vault Bootstrap Cleanup'
     $vaultId = az keyvault show --name $KeyVaultName --resource-group $ResourceGroupName --query id -o tsv --only-show-errors
     $roleId = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
     $assignments = @(az role assignment list --scope $vaultId --assignee-object-id $OperatorId --role $roleId --query '[].id' -o tsv --only-show-errors)
@@ -464,22 +542,6 @@ function Remove-TemporaryKeyVaultOperatorAccess([string]$OperatorId) {
         if (-not [string]::IsNullOrWhiteSpace($assignment)) {
             az role assignment delete --ids $assignment --only-show-errors
         }
-    }
-}
-
-function Enable-AzureFilesBackup {
-    Write-Step 'PHASE 4 - Configure Azure Files Backup Protection'
-    az backup protection enable-for-azurefileshare `
-        --policy-name 'NANDA-policy-azure-files-daily' `
-        --resource-group $ResourceGroupName `
-        --vault-name 'NANDA-rsv-arrowhead-aca' `
-        --storage-account $StorageAccountName `
-        --azure-file-share 'pureota-data' `
-        --only-show-errors `
-        --output none
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning 'Azure Files backup protection could not be enabled automatically. The vault and policy were created; review the Azure Backup prerequisite/trusted-services requirement and run the documented command manually.'
     }
 }
 
@@ -494,11 +556,14 @@ function Get-DefaultDomain {
 Assert-AzCli
 Assert-BicepCompilation
 $account = Assert-AzureLogin
-if (-not (Test-Path $MainBicep)) { throw "main.bicep not found: $MainBicep" }
+if (-not (Test-Path $FoundationBicep)) { throw "main.bicep not found: $FoundationBicep" }
 
 if ($GithubRepository -notmatch '^[^/]+/[^/]+$') {
     throw "GithubRepository must be in OWNER/REPOSITORY format. Received '$GithubRepository'."
 }
+
+$githubRepositorySubjectPrefix = Get-GitHubRepositorySubjectPrefix
+Ensure-ResourceGroupForRecovery
 
 if ($NotificationEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
     throw 'NotificationEmail must be a valid email address.'
@@ -540,14 +605,12 @@ try {
     $helixClientId = Ensure-EntraApplication -DisplayName $HelixAppRegistrationName -RedirectUri $helixRedirect -SecretName $HelixAuthSecretName -GroupId $helixGroupId -OperatorId $operatorId
 
     Invoke-RuntimeDeployment `
-        -Password $plainPassword `
         -PureotaGroupId $pureotaGroupId `
         -PureotaClientId $pureotaClientId `
         -HelixGroupId $helixGroupId `
         -HelixClientId $helixClientId `
         -PostgresAdminGroupId $postgresAdminGroupId
 
-    Enable-AzureFilesBackup
 
     Write-Step 'DEPLOYMENT COMPLETE'
     Write-Host "Resource Group        : $ResourceGroupName" -ForegroundColor Green
@@ -555,26 +618,21 @@ try {
     Write-Host 'ACR                   : Premium / admin disabled / retention enabled' -ForegroundColor Green
     Write-Host 'Key Vault             : RBAC / soft delete / purge protection' -ForegroundColor Green
     Write-Host 'PostgreSQL            : Private / Entra enabled / 7-day PITR retention' -ForegroundColor Green
-    Write-Host 'Azure Files           : Private / persistent / backup policy configured' -ForegroundColor Green
+    Write-Host 'Azure Files           : Private / persistent' -ForegroundColor Green
     Write-Host 'PureOTA               : Dummy ACA app + Easy Auth + persistent mount' -ForegroundColor Green
     Write-Host 'HelixBridge           : Dummy ACA app + Easy Auth' -ForegroundColor Green
     Write-Host 'PureOTA ACA Job       : Manual job with persistent mount' -ForegroundColor Green
     Write-Host 'Azure Monitor         : Required platform alerts configured' -ForegroundColor Green
     Write-Host 'GitHub OIDC           : Federated main + production credentials' -ForegroundColor Green
+
+    Write-Host 'Infrastructure is ready.' -ForegroundColor Green
     Write-Host ''
-    Write-Host 'GitHub Actions client ID:' -ForegroundColor Yellow
-    az identity show --name 'NANDA-id-github-actions' --resource-group $ResourceGroupName --query clientId -o tsv
-    Write-Host ''
-    Write-Host 'Next: configure these GitHub repository secrets:' -ForegroundColor Yellow
-    Write-Host '  AZURE_CLIENT_ID      = value printed above'
-    Write-Host "  AZURE_TENANT_ID      = $($account.tenantId)"
-    Write-Host "  AZURE_SUBSCRIPTION_ID= $($account.id)"
-    Write-Host ''
-    Write-Host 'Important: the dummy apps use a temporary bootstrap image. The GitHub workflow must replace them with the immutable commit-SHA images before acceptance.' -ForegroundColor Yellow
 }
 finally {
     if ($storageKey) { $storageKey = $null }
     $plainPassword = $null
     $PostgreSqlPassword = $null
-    try { Remove-TemporaryKeyVaultOperatorAccess -OperatorId $operatorId } catch { Write-Warning "Temporary Key Vault role cleanup failed: $($_.Exception.Message)" }
+    if (-not [string]::IsNullOrWhiteSpace($operatorId)) {
+        try { Remove-TemporaryKeyVaultOperatorAccess -OperatorId $operatorId } catch { Write-Warning "Temporary Key Vault role cleanup failed: $($_.Exception.Message)" }
+    }
 }

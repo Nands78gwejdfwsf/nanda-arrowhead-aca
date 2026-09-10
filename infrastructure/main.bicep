@@ -3,26 +3,12 @@ targetScope = 'subscription'
 @description('Azure region')
 param location string = 'westus'
 @description('Resource group')
-param resourceGroupName string = 'NANDA-rg-arrowhead-aca-test'
-@description('GitHub repository in OWNER/REPOSITORY format')
-param githubRepository string
+param resourceGroupName string = 'NANDA-rg-arrowhead-aca-test1'
+@description('GitHub OIDC subject prefix in OWNER@OWNER-ID/REPOSITORY@REPOSITORY-ID format')
+param githubRepositorySubjectPrefix string
 @secure()
 @description('Temporary PostgreSQL administrator password. Used only to bootstrap the server.')
 param postgresqlAdministratorLoginPassword string
-@description('PostgreSQL Entra administrator group object ID. Empty during foundation phase.')
-param postgresqlEntraAdministratorObjectId string = ''
-@description('PostgreSQL Entra administrator group display name. Empty during foundation phase.')
-param postgresqlEntraAdministratorName string = ''
-@description('PureOTA Entra group object ID. Empty during foundation phase.')
-param pureotaEntraGroupObjectId string = ''
-@description('PureOTA Entra application client ID. Empty during foundation phase.')
-param pureotaEntraClientId string = ''
-@description('HelixBridge Entra group object ID. Empty during foundation phase.')
-param helixbridgeEntraGroupObjectId string = ''
-@description('HelixBridge Entra application client ID. Empty during foundation phase.')
-param helixbridgeEntraClientId string = ''
-@description('Deploy application resources after secrets and Entra configuration are ready.')
-param deployRuntimeResources bool = false
 @description('Monitoring notification email. Required when runtime resources are deployed.')
 param notificationEmail string
 @description('Monthly resource group budget amount in subscription currency.')
@@ -37,7 +23,7 @@ var acaSubnetName = 'NANDA-snet-aca'
 var privateEndpointSubnetName = 'NANDA-snet-private-endpoint'
 var logAnalyticsWorkspaceName = 'NANDA-law-arrowhead-aca-test'
 var acrName = 'nandaacrarrowheadaca'
-var keyVaultName = 'NANDA-kv-aca-test15'
+var keyVaultName = 'NANDA-kv-aca-test20'
 var postgresqlServerName = 'nanda-pg-aca-test'
 var containerAppsEnvironmentName = 'NANDA-cae-arrowhead-aca-test'
 var pureotaStorageAccountName = 'nandastpureotaaca'
@@ -49,8 +35,6 @@ var githubIdentityName = 'NANDA-id-github-actions'
 var pureotaAppName = 'nanda-ca-pureota'
 var helixAppName = 'nanda-ca-helixbridge'
 var pureotaJobName = 'nanda-job-pureota'
-var backupVaultName = 'NANDA-rsv-arrowhead-aca'
-var backupPolicyName = 'NANDA-policy-azure-files-daily'
 var storageBindingName = 'nanda-pureota-storage'
 var pureotaStorageKeySecretName = 'pureota-storage-key'
 var pureotaAuthSecretName = 'pureota-entra-client-secret'
@@ -154,7 +138,7 @@ module githubIdentity './Modules/githubActionsIdentity.bicep' = {
   params: {
     identityName: githubIdentityName
     location: location
-    githubRepository: githubRepository
+    githubRepositorySubjectPrefix: githubRepositorySubjectPrefix
   }
 }
 
@@ -236,17 +220,6 @@ module postgresDns './Modules/privateDns.bicep' = {
     zoneGroupName: 'postgresql-dns-zone-group'
   }
 }
-module postgresAdmin './Modules/postgresqlAdmin.bicep' = if (deployRuntimeResources && !empty(postgresqlEntraAdministratorObjectId)) {
-  name: 'postgresAdmin'
-  scope: rg
-  params: {
-    serverName: postgresqlServerName
-    principalObjectId: postgresqlEntraAdministratorObjectId
-    principalName: postgresqlEntraAdministratorName
-    principalType: 'Group'
-  }
-}
-
 module storage './Modules/storage.bicep' = {
   name: 'storage'
   scope: rg
@@ -295,21 +268,6 @@ module acaEnvironment './Modules/containerAppsEnvironment.bicep' = {
   }
 }
 
-module containerStorage './Modules/containerAppsStorage.bicep' = if (deployRuntimeResources) {
-  name: 'containerAppsStorage'
-  scope: rg
-  dependsOn: [acaEnvironment, storage, keyVault, storageKvAccess]
-  params: {
-    environmentName: containerAppsEnvironmentName
-    storageName: storageBindingName
-    storageAccountName: pureotaStorageAccountName
-    fileShareName: pureotaFileShareName
-    keyVaultName: keyVaultName
-    storageIdentityId: storageIdentity.outputs.id
-    secretName: pureotaStorageKeySecretName
-  }
-}
-
 module githubRgReader './Modules/resourceGroupRoleAssignment.bicep' = {
   name: 'githubResourceGroupReader'
   scope: rg
@@ -318,16 +276,6 @@ module githubRgReader './Modules/resourceGroupRoleAssignment.bicep' = {
   }
 }
 
-module backup './Modules/backup.bicep' = {
-  name: 'backup'
-  scope: rg
-  params: {
-    vaultName: backupVaultName
-    location: location
-    policyName: backupPolicyName
-    retentionDays: 30
-  }
-}
 
 module budget './Modules/budget.bicep' = {
   name: 'budget'
@@ -341,144 +289,10 @@ module budget './Modules/budget.bicep' = {
 }
 
 // Runtime starts only after deploy.ps1 has populated Key Vault and Entra configuration.
-module pureotaKvAccess './Modules/roleAssignment.bicep' = if (deployRuntimeResources) {
-  name: 'pureotaKvAccess'
-  scope: rg
-  params: {
-    keyVaultName: keyVaultName
-    secretName: pureotaAuthSecretName
-    principalId: pureotaIdentity.outputs.principalId
-    roleDefinitionId: '4633458b-17de-408a-b874-0445c86b69e6'
-  }
-}
-module helixKvAccess './Modules/roleAssignment.bicep' = if (deployRuntimeResources) {
-  name: 'helixKvAccess'
-  scope: rg
-  params: {
-    keyVaultName: keyVaultName
-    secretName: helixAuthSecretName
-    principalId: helixIdentity.outputs.principalId
-    roleDefinitionId: '4633458b-17de-408a-b874-0445c86b69e6'
-  }
-}
-module storageKvAccess './Modules/roleAssignment.bicep' = if (deployRuntimeResources) {
-  name: 'storageKvAccess'
-  scope: rg
-  params: {
-    keyVaultName: keyVaultName
-    secretName: pureotaStorageKeySecretName
-    principalId: storageIdentity.outputs.principalId
-    roleDefinitionId: '4633458b-17de-408a-b874-0445c86b69e6'
-  }
-}
 
-module pureotaApp './Modules/containerApp.bicep' = if (deployRuntimeResources) {
-  name: 'pureotaApp'
-  scope: rg
-  dependsOn: [containerStorage, pureotaKvAccess]
-  params: {
-    name: pureotaAppName
-    location: location
-    environmentId: acaEnvironment.outputs.id
-    image: 'nginx:alpine'
-    containerPort: 80
-    minReplicas: 1
-    maxReplicas: 1
-    identityId: pureotaIdentity.outputs.id
-    githubActionsPrincipalId: githubIdentity.outputs.principalId
-    acrLoginServer: acr.outputs.loginServer
-    keyVaultName: keyVaultName
-    keyVaultSecretName: pureotaAuthSecretName
-    enableKeyVaultSecret: true
-    enableAzureFile: true
-    azureFileStorageName: storageBindingName
-    azureFileMountPath: '/usr/share/nginx/html/tier-data'
-    healthPath: '/'
-  }
-}
-module helixApp './Modules/containerApp.bicep' = if (deployRuntimeResources) {
-  name: 'helixApp'
-  scope: rg
-  dependsOn: [helixKvAccess]
-  params: {
-    name: helixAppName
-    location: location
-    environmentId: acaEnvironment.outputs.id
-    image: 'nginx:alpine'
-    containerPort: 80
-    minReplicas: 1
-    maxReplicas: 1
-    identityId: helixIdentity.outputs.id
-    githubActionsPrincipalId: githubIdentity.outputs.principalId
-    acrLoginServer: acr.outputs.loginServer
-    keyVaultName: keyVaultName
-    keyVaultSecretName: helixAuthSecretName
-    enableKeyVaultSecret: true
-    enableAzureFile: false
-    healthPath: '/'
-  }
-}
-
-module pureotaAuth './Modules/containerAppAuth.bicep' = if (deployRuntimeResources) {
-  name: 'pureotaAuth'
-  scope: rg
-  dependsOn: [pureotaApp]
-  params: {
-    containerAppName: pureotaAppName
-    clientId: pureotaEntraClientId
-    tenantId: tenantId
-    allowedGroupId: pureotaEntraGroupObjectId
-    settingName: pureotaAuthSecretName
-  }
-}
-module helixAuth './Modules/containerAppAuth.bicep' = if (deployRuntimeResources) {
-  name: 'helixAuth'
-  scope: rg
-  dependsOn: [helixApp]
-  params: {
-    containerAppName: helixAppName
-    clientId: helixbridgeEntraClientId
-    tenantId: tenantId
-    allowedGroupId: helixbridgeEntraGroupObjectId
-    settingName: helixAuthSecretName
-  }
-}
-
-module pureotaJob './Modules/containerAppJob.bicep' = if (deployRuntimeResources) {
-  name: 'pureotaJob'
-  scope: rg
-  dependsOn: [containerStorage]
-  params: {
-    name: pureotaJobName
-    location: location
-    environmentId: acaEnvironment.outputs.id
-    image: 'nginx:alpine'
-    identityId: pureotaIdentity.outputs.id
-    githubActionsPrincipalId: githubIdentity.outputs.principalId
-    acrLoginServer: acr.outputs.loginServer
-    storageName: storageBindingName
-    command: 'echo "PureOTA dummy ACA Job executed" > /mnt/tier-data/job-validation.txt && date -u >> /mnt/tier-data/job-validation.txt && cat /mnt/tier-data/job-validation.txt'
-  }
-}
-
-module monitoring './Modules/monitoring.bicep' = if (deployRuntimeResources) {
-  name: 'monitoring'
-  scope: rg
-  dependsOn: [pureotaApp, helixApp, postgres, storage]
-  params: {
-    location: location
-    actionGroupName: 'NANDA-ag-aca-platform'
-    notificationEmail: notificationEmail
-    logAnalyticsWorkspaceId: law.outputs.id
-    pureotaAppId: pureotaApp.outputs.id!
-    helixBridgeAppId: helixApp.outputs.id!
-    postgresqlId: postgres.outputs.id
-    storageFileServiceId: storage.outputs.fileServiceId
-    postgresqlConnectionThreshold: 80
-    storageThreshold: 80
-    fileShareBandwidthThreshold: 80
-  }
-}
+// Runtime resources are deployed separately by runtime.bicep.
+// This foundation template creates the platform once and never attempts
+// to recreate those resources during the runtime deployment.
 
 output resourceGroup string = rg.name
 output acrLoginServer string = acr.outputs.loginServer
@@ -486,6 +300,6 @@ output keyVaultUri string = keyVault.outputs.uri
 output acaEnvironmentId string = acaEnvironment.outputs.id
 output githubActionsClientId string = githubIdentity.outputs.clientId
 output githubActionsPrincipalId string = githubIdentity.outputs.principalId
-output pureotaAppName string = pureotaAppName
-output helixBridgeAppName string = helixAppName
+output pureotaStorageAccountName string = pureotaStorageAccountName
+output pureotaFileShareName string = pureotaFileShareName
 output postgresqlFqdn string = postgres.outputs.fqdn
