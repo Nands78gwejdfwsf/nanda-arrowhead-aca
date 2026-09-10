@@ -445,12 +445,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          az containerapp ingress traffic set \
+          app_id=$(az containerapp show \
             --name "${{ matrix.containerAppName }}" \
             --resource-group "$RESOURCE_GROUP" \
-            --revision-weight \
-              "${{ steps.current.outputs.current }}=100" \
-              "${{ steps.revision.outputs.revision }}=0"
+            --query id \
+            --output tsv)
+
+          current="${{ steps.current.outputs.current }}"
+
+          echo "Keeping current revision at 100%:"
+          echo "$current"
+
+          az rest \
+            --method PATCH \
+            --url "${app_id}?api-version=2025-01-01" \
+            --body "{\"properties\":{\"configuration\":{\"ingress\":{\"traffic\":[{\"revisionName\":\"$current\",\"weight\":100}]}}}}" \
+            --headers Content-Type=application/json
+
+          echo "Old revision remains at 100% during validation."
 
 
       # --------------------------------------------------------
@@ -529,18 +541,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Deployment/health validation failed."
-
-          echo "Rolling back to:"
-          echo "${{ steps.current.outputs.current }}"
-
-          az containerapp ingress traffic set \
+          app_id=$(az containerapp show \
             --name "${{ matrix.containerAppName }}" \
             --resource-group "$RESOURCE_GROUP" \
-            --revision-weight \
-              "${{ steps.current.outputs.current }}=100"
+            --query id \
+            --output tsv)
+
+          current="${{ steps.current.outputs.current }}"
+
+          echo "Deployment/health validation failed."
+          echo "Rolling back to:"
+          echo "$current"
+
+          az rest \
+            --method PATCH \
+            --url "${app_id}?api-version=2025-01-01" \
+            --body "{\"properties\":{\"configuration\":{\"ingress\":{\"traffic\":[{\"revisionName\":\"$current\",\"weight\":100}]}}}}" \
+            --headers Content-Type=application/json
 
           echo "Rollback completed."
+
 
 
   # ============================================================
@@ -747,20 +767,24 @@ jobs:
             --output tsv)
 
           if [[ -z "$revision" ]]; then
-
             echo "Validated revision was not found."
-
             exit 1
-
           fi
 
           echo "Promoting revision:"
           echo "$revision"
 
-          az containerapp ingress traffic set \
+          app_id=$(az containerapp show \
             --name "${{ matrix.containerAppName }}" \
             --resource-group "$RESOURCE_GROUP" \
-            --revision-weight "$revision=100"
+            --query id \
+            --output tsv)
+
+          az rest \
+            --method PATCH \
+            --url "${app_id}?api-version=2025-01-01" \
+            --body "{\"properties\":{\"configuration\":{\"ingress\":{\"traffic\":[{\"revisionName\":\"$revision\",\"weight\":100}]}}}}" \
+            --headers Content-Type=application/json
 
           actual=$(az containerapp revision list \
             --name "${{ matrix.containerAppName }}" \
@@ -770,18 +794,14 @@ jobs:
             --output tsv)
 
           if [[ "$actual" != "$revision" ]]; then
-
             echo "Traffic validation failed."
-
             echo "Expected: $revision"
-
             echo "Actual: $actual"
-
             exit 1
-
           fi
 
           echo "Revision successfully promoted to 100% traffic."
+
 
 
   # ============================================================
