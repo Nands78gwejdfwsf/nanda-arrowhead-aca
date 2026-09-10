@@ -1,5 +1,5 @@
 {
-  "resourceGroupName": "NANDA-rg-arrowhead-aca-test",
+  "resourceGroupName": "NANDA-rg-arrowhead-aca-test1",
   "acrName": "nandaacrarrowheadaca",
   "acrLoginServer": "nandaacrarrowheadaca.azurecr.io",
   "environmentName": "NANDA-cae-arrowhead-aca-test"
