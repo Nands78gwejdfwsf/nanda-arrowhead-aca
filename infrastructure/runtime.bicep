@@ -4,7 +4,7 @@ targetScope = 'resourceGroup'
 param location string = 'westus'
 
 @description('Existing resource group')
-param resourceGroupName string = 'NANDA-rg-arrowhead-aca-test1'
+param resourceGroupName string
 
 @description('PostgreSQL Entra administrator group object ID')
 param postgresqlEntraAdministratorObjectId string
@@ -24,27 +24,52 @@ param helixbridgeEntraGroupObjectId string
 @description('HelixBridge Entra application client ID')
 param helixbridgeEntraClientId string
 
+@description('Microsoft Entra tenant ID')
+param tenantId string
+
 @description('Monitoring notification email')
 param notificationEmail string
 
-var acrName = 'nandaacrarrowheadaca'
-var keyVaultName = 'NANDA-kv-aca-test20'
-var postgresqlServerName = 'nanda-pg-aca-test'
-var containerAppsEnvironmentName = 'NANDA-cae-arrowhead-aca-test'
-var pureotaStorageAccountName = 'nandastpureotaaca'
-var pureotaFileShareName = 'pureota-data'
-var pureotaIdentityName = 'NANDA-id-pureota'
-var helixIdentityName = 'NANDA-id-helixbridge'
-var storageIdentityName = 'NANDA-id-aca-storage'
-var githubIdentityName = 'NANDA-id-github-actions'
-var pureotaAppName = 'nanda-ca-pureota'
-var helixAppName = 'nanda-ca-helixbridge'
-var pureotaJobName = 'nanda-job-pureota'
-var storageBindingName = 'nanda-pureota-storage'
-var pureotaStorageKeySecretName = 'pureota-storage-key'
-var pureotaAuthSecretName = 'pureota-entra-client-secret'
-var helixAuthSecretName = 'helixbridge-entra-client-secret'
-var tenantId = subscription().tenantId
+@description('Azure Container Registry name.')
+param acrName string
+@description('Key Vault name.')
+param keyVaultName string
+@description('PostgreSQL Flexible Server name.')
+param postgresqlServerName string
+@description('Azure Container Apps environment name.')
+param containerAppsEnvironmentName string
+@description('Azure Storage account name for PureOTA files.')
+param pureotaStorageAccountName string
+@description('Azure Files share name.')
+param pureotaFileShareName string
+@description('PureOTA managed identity name.')
+param pureotaIdentityName string
+@description('HelixBridge managed identity name.')
+param helixIdentityName string
+@description('Storage managed identity name.')
+param storageIdentityName string
+@description('GitHub Actions managed identity name.')
+param githubIdentityName string
+@description('PureOTA Container App name.')
+param pureotaAppName string
+@description('HelixBridge Container App name.')
+param helixAppName string
+@description('PureOTA Container Apps Job name.')
+param pureotaJobName string
+@description('Container Apps Azure Files storage binding name.')
+param storageBindingName string
+@description('Key Vault secret name for Azure Files storage key.')
+param pureotaStorageKeySecretName string
+@description('Key Vault secret name for PureOTA Entra client secret.')
+param pureotaAuthSecretName string
+@description('Key Vault secret name for HelixBridge Entra client secret.')
+param helixAuthSecretName string
+@description('Log Analytics workspace name.')
+param logAnalyticsWorkspaceName string
+@description('PostgreSQL database name.')
+param postgresDatabaseName string
+@description('Azure Monitor action group name.')
+param monitoringActionGroupName string
 
 resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   name: acrName
@@ -83,7 +108,7 @@ resource githubIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-0
 }
 
 resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
-  name: 'NANDA-law-arrowhead-aca-test'
+  name: logAnalyticsWorkspaceName
 }
 
 module storageKvAccess './Modules/roleAssignment.bicep' = {
@@ -151,6 +176,10 @@ module pureotaApp './Modules/containerApp.bicep' = {
     azureFileStorageName: storageBindingName
     azureFileMountPath: '/usr/share/nginx/html/tier-data'
     healthPath: '/healthz'
+    postgresHost: postgres.properties.fullyQualifiedDomainName
+    postgresDatabase: postgresDatabaseName
+    postgresUser: pureotaIdentityName
+    postgresClientId: pureotaIdentity.properties.clientId
   }
 }
 
@@ -173,6 +202,10 @@ module helixApp './Modules/containerApp.bicep' = {
     enableKeyVaultSecret: true
     enableAzureFile: false
     healthPath: '/healthz'
+    postgresHost: postgres.properties.fullyQualifiedDomainName
+    postgresDatabase: postgresDatabaseName
+    postgresUser: helixIdentityName
+    postgresClientId: helixIdentity.properties.clientId
   }
 }
 
@@ -212,7 +245,11 @@ module pureotaJob './Modules/containerAppJob.bicep' = {
     githubActionsPrincipalId: githubIdentity.properties.principalId
     acrLoginServer: '${acr.name}.azurecr.io'
     storageName: storageBindingName
-    command: 'echo "PureOTA dummy ACA Job executed" > /mnt/tier-data/job-validation.txt && date -u >> /mnt/tier-data/job-validation.txt && cat /mnt/tier-data/job-validation.txt'
+    command: '/usr/local/bin/db-check.sh && echo "PureOTA dummy ACA Job executed" > /mnt/tier-data/job-validation.txt && date -u >> /mnt/tier-data/job-validation.txt && cat /mnt/tier-data/job-validation.txt'
+    postgresHost: postgres.properties.fullyQualifiedDomainName
+    postgresDatabase: postgresDatabaseName
+    postgresUser: pureotaIdentityName
+    postgresClientId: pureotaIdentity.properties.clientId
   }
 }
 
@@ -231,7 +268,7 @@ module monitoring './Modules/monitoring.bicep' = {
   dependsOn: [pureotaApp, helixApp, postgres, storage]
   params: {
     location: location
-    actionGroupName: 'NANDA-ag-aca-platform'
+    actionGroupName: monitoringActionGroupName
     notificationEmail: notificationEmail
     logAnalyticsWorkspaceId: law.id
     pureotaAppId: pureotaApp.outputs.id!

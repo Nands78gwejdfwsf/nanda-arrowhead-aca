@@ -28,6 +28,7 @@
 | DATA-2..DATA-6 | Managed PostgreSQL with Entra auth, private access and backup retention; server is created by Bicep on clean rebuild |
 | DATA-7..DATA-10 | Private Azure Files share, persistent ACA mount and persistent Azure Files storage (file-share backup is not included in this POC deployment) |
 | DATA-11 | Dummy applications pinned to one replica in IaC |
+| DATA-13 | PureOTA and HelixBridge receive PostgreSQL connection settings and use their user-assigned managed identities for Entra token authentication; the PureOTA CI/CD Job performs the same DB connection check. |
 | DATA-12 | Dummy applications do not use session state |
 | AUTH-1..AUTH-4 | Easy Auth + dedicated group authorization implemented for both dummy apps |
 | AUTH-5 | Entra P1+ licensing must be confirmed by Arrowhead IT |
@@ -40,6 +41,7 @@
 | NET-7 | Caddy is not used by ACA applications |
 | NET-8 | Retained AZDKR01 workloads are outside this POC repository |
 | IAC-1..IAC-5 | Azure resources are defined in Bicep modules; PostgreSQL is created by Bicep; secret values are populated separately by deploy-lab.ps1 |
+| IAM-1 | GitHub Actions identity receives Reader, Container Apps Contributor and Container Apps Jobs Contributor at resource-group scope through Bicep. |
 | OBS-1 | ACA and Key Vault logs flow to Log Analytics |
 | OBS-2 | Required alert categories are configured in monitoring.bicep |
 | OBS-3 | Log Analytics workspace is the operational log source |

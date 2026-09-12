@@ -15,6 +15,10 @@ param enableAzureFile bool = false
 param azureFileStorageName string = ''
 param azureFileMountPath string = '/mnt/data'
 param healthPath string = '/healthz'
+param postgresHost string = ''
+param postgresDatabase string = ''
+param postgresUser string = ''
+param postgresClientId string = ''
 
 resource app 'Microsoft.App/containerApps@2025-07-01' = {
   name: name
@@ -52,6 +56,14 @@ resource app 'Microsoft.App/containerApps@2025-07-01' = {
         {
           name: name
           image: image
+          env: !empty(postgresHost) ? [
+            { name: 'PGHOST', value: postgresHost }
+            { name: 'PGPORT', value: '5432' }
+            { name: 'PGDATABASE', value: postgresDatabase }
+            { name: 'PGUSER', value: postgresUser }
+            { name: 'PGSSLMODE', value: 'require' }
+            { name: 'IDENTITY_CLIENT_ID', value: postgresClientId }
+          ] : []
           resources: { cpu: json('0.25')
 memory: '0.5Gi' }
           volumeMounts: enableAzureFile ? [

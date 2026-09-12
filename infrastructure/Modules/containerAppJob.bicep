@@ -7,6 +7,10 @@ param githubActionsPrincipalId string = ''
 param acrLoginServer string
 param storageName string
 param command string
+param postgresHost string = ''
+param postgresDatabase string = ''
+param postgresUser string = ''
+param postgresClientId string = ''
 
 resource job 'Microsoft.App/jobs@2025-10-02-preview' = {
   name: name
@@ -35,6 +39,14 @@ replicaCompletionCount: 1 }
           image: image
           command: ['/bin/sh', '-c']
           args: [command]
+          env: !empty(postgresHost) ? [
+            { name: 'PGHOST', value: postgresHost }
+            { name: 'PGPORT', value: '5432' }
+            { name: 'PGDATABASE', value: postgresDatabase }
+            { name: 'PGUSER', value: postgresUser }
+            { name: 'PGSSLMODE', value: 'require' }
+            { name: 'IDENTITY_CLIENT_ID', value: postgresClientId }
+          ] : []
           resources: { cpu: json('0.25')
 memory: '0.5Gi' }
           volumeMounts: [

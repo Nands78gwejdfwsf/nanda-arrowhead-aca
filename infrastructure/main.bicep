@@ -3,7 +3,7 @@ targetScope = 'subscription'
 @description('Azure region')
 param location string = 'westus'
 @description('Resource group')
-param resourceGroupName string = 'NANDA-rg-arrowhead-aca-test1'
+param resourceGroupName string
 @description('GitHub OIDC subject prefix in OWNER@OWNER-ID/REPOSITORY@REPOSITORY-ID format')
 param githubRepositorySubjectPrefix string
 @secure()
@@ -18,28 +18,70 @@ param budgetStartDate string = '2026-09-01T00:00:00Z'
 @description('Enable Key Vault private endpoint. Keep false until Arrowhead network/DNS integration is approved.')
 param enableKeyVaultPrivateEndpoint bool = false
 
-var vnetName = 'NANDA-vnet-arrowhead-aca-test'
-var acaSubnetName = 'NANDA-snet-aca'
-var privateEndpointSubnetName = 'NANDA-snet-private-endpoint'
-var logAnalyticsWorkspaceName = 'NANDA-law-arrowhead-aca-test'
-var acrName = 'nandaacrarrowheadaca'
-var keyVaultName = 'NANDA-kv-aca-test20'
-var postgresqlServerName = 'nanda-pg-aca-test'
-var containerAppsEnvironmentName = 'NANDA-cae-arrowhead-aca-test'
-var pureotaStorageAccountName = 'nandastpureotaaca'
-var pureotaFileShareName = 'pureota-data'
-var pureotaIdentityName = 'NANDA-id-pureota'
-var helixIdentityName = 'NANDA-id-helixbridge'
-var storageIdentityName = 'NANDA-id-aca-storage'
-var githubIdentityName = 'NANDA-id-github-actions'
-var pureotaAppName = 'nanda-ca-pureota'
-var helixAppName = 'nanda-ca-helixbridge'
-var pureotaJobName = 'nanda-job-pureota'
-var storageBindingName = 'nanda-pureota-storage'
-var pureotaStorageKeySecretName = 'pureota-storage-key'
-var pureotaAuthSecretName = 'pureota-entra-client-secret'
-var helixAuthSecretName = 'helixbridge-entra-client-secret'
-var tenantId = subscription().tenantId
+@description('Recovery Services vault name for Azure Files backup.')
+param azureFilesBackupVaultName string
+
+@description('Azure Files backup policy name.')
+param azureFilesBackupPolicyName string
+
+@description('Daily Azure Files backup time in UTC.')
+param azureFilesBackupScheduleRunTimeUtc string = '2026-01-01T02:00:00Z'
+
+@description('Azure Files backup retention in days.')
+param azureFilesBackupRetentionDays int = 30
+
+@description('Virtual network name.')
+param vnetName string
+@description('ACA infrastructure subnet name.')
+param acaSubnetName string
+@description('Private endpoint subnet name.')
+param privateEndpointSubnetName string
+@description('Log Analytics workspace name.')
+param logAnalyticsWorkspaceName string
+@description('Azure Container Registry name.')
+param acrName string
+@description('Key Vault name.')
+param keyVaultName string
+@description('PostgreSQL Flexible Server name.')
+param postgresqlServerName string
+@description('Azure Container Apps environment name.')
+param containerAppsEnvironmentName string
+@description('Azure Storage account name for PureOTA files.')
+param pureotaStorageAccountName string
+@description('Azure Files share name.')
+param pureotaFileShareName string
+@description('PureOTA managed identity name.')
+param pureotaIdentityName string
+@description('HelixBridge managed identity name.')
+param helixIdentityName string
+@description('Storage managed identity name.')
+param storageIdentityName string
+@description('GitHub Actions managed identity name.')
+param githubIdentityName string
+@description('PureOTA Container App name.')
+param pureotaAppName string
+@description('HelixBridge Container App name.')
+param helixAppName string
+@description('PureOTA Container Apps Job name.')
+param pureotaJobName string
+@description('Container Apps Azure Files storage binding name.')
+param storageBindingName string
+@description('Key Vault secret name for Azure Files storage key.')
+param pureotaStorageKeySecretName string
+@description('Key Vault secret name for PureOTA Entra client secret.')
+param pureotaAuthSecretName string
+@description('Key Vault secret name for HelixBridge Entra client secret.')
+param helixAuthSecretName string
+@description('Resource group budget name.')
+param budgetName string
+@description('ACR private endpoint name.')
+param acrPrivateEndpointName string
+@description('Key Vault private endpoint name.')
+param keyVaultPrivateEndpointName string
+@description('PostgreSQL private endpoint name.')
+param postgresPrivateEndpointName string
+@description('Azure Files storage private endpoint name.')
+param storagePrivateEndpointName string
 
 resource rg 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: resourceGroupName
@@ -92,7 +134,7 @@ module acrPe './Modules/privateEndpoint.bicep' = {
   name: 'acrPrivateEndpoint'
   scope: rg
   params: {
-    name: 'NANDA-pe-acr-arrowhead-aca'
+    name: acrPrivateEndpointName
     location: location
     subnetId: network.outputs.privateEndpointSubnetId
     targetResourceId: acr.outputs.id
@@ -163,7 +205,7 @@ module keyVaultPe './Modules/privateEndpoint.bicep' = if (enableKeyVaultPrivateE
   name: 'keyVaultPrivateEndpoint'
   scope: rg
   params: {
-    name: 'NANDA-pe-keyvault-aca'
+    name: keyVaultPrivateEndpointName
     location: location
     subnetId: network.outputs.privateEndpointSubnetId
     targetResourceId: keyVault.outputs.id
@@ -200,7 +242,7 @@ module postgresPe './Modules/privateEndpoint.bicep' = {
   name: 'postgresPrivateEndpoint'
   scope: rg
   params: {
-    name: 'NANDA-pe-postgresql-aca'
+    name: postgresPrivateEndpointName
     location: location
     subnetId: network.outputs.privateEndpointSubnetId
     targetResourceId: postgres.outputs.id
@@ -234,7 +276,7 @@ module storagePe './Modules/privateEndpoint.bicep' = {
   name: 'storagePrivateEndpoint'
   scope: rg
   params: {
-    name: 'NANDA-pe-pureota-storage'
+    name: storagePrivateEndpointName
     location: location
     subnetId: network.outputs.privateEndpointSubnetId
     targetResourceId: storage.outputs.id
@@ -252,6 +294,24 @@ module storageDns './Modules/privateDns.bicep' = {
     vnetId: network.outputs.vnetId
     privateEndpointName: 'NANDA-pe-pureota-storage'
     zoneGroupName: 'storage-file-dns-zone-group'
+  }
+}
+
+module azureFilesBackup './Modules/azureFilesBackup.bicep' = {
+  name: 'azureFilesBackup'
+  scope: rg
+  dependsOn: [
+    storage
+  ]
+  params: {
+    location: location
+    vaultName: azureFilesBackupVaultName
+    policyName: azureFilesBackupPolicyName
+    storageResourceGroupName: resourceGroupName
+    storageAccountName: pureotaStorageAccountName
+    fileShareName: pureotaFileShareName
+    scheduleRunTimeUtc: azureFilesBackupScheduleRunTimeUtc
+    retentionDays: azureFilesBackupRetentionDays
   }
 }
 
@@ -273,6 +333,30 @@ module githubRgReader './Modules/resourceGroupRoleAssignment.bicep' = {
   scope: rg
   params: {
     principalId: githubIdentity.outputs.principalId
+    roleDefinitionId: 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
+  }
+}
+
+// GitHub Actions needs deterministic resource-group scope permissions for
+// revision inspection/deployment and ACA Job execution. Resource-group scoped
+// role assignments are deployed through modules because this main file is
+// subscription-scoped. The assignments are therefore reproducible on a clean
+// rebuild without relying on manual RBAC changes.
+module githubRgContainerAppsContributor './Modules/resourceGroupRoleAssignment.bicep' = {
+  name: 'githubResourceGroupContainerAppsContributor'
+  scope: rg
+  params: {
+    principalId: githubIdentity.outputs.principalId
+    roleDefinitionId: '358470bc-b998-42bd-ab17-a7e34c199c0f'
+  }
+}
+
+module githubRgContainerAppsJobsContributor './Modules/resourceGroupRoleAssignment.bicep' = {
+  name: 'githubResourceGroupContainerAppsJobsContributor'
+  scope: rg
+  params: {
+    principalId: githubIdentity.outputs.principalId
+    roleDefinitionId: '4e3d2b60-56ae-4dc6-a233-09c8e5a82e68'
   }
 }
 
@@ -283,7 +367,7 @@ module budget './Modules/budget.bicep' = {
   params: {
     amount: monthlyBudgetAmount
     notificationEmail: notificationEmail
-    budgetName: 'NANDA-budget-arrowhead-aca-test'
+    budgetName: budgetName
     startDate: budgetStartDate
   }
 }
@@ -302,4 +386,6 @@ output githubActionsClientId string = githubIdentity.outputs.clientId
 output githubActionsPrincipalId string = githubIdentity.outputs.principalId
 output pureotaStorageAccountName string = pureotaStorageAccountName
 output pureotaFileShareName string = pureotaFileShareName
+output azureFilesBackupVaultName string = azureFilesBackupVaultName
+output azureFilesBackupPolicyName string = azureFilesBackupPolicyName
 output postgresqlFqdn string = postgres.outputs.fqdn
