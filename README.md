@@ -1,54 +1,71 @@
 # Arrowhead ACA CI/CD POC
 
-This repository contains the Arrowhead Pharmaceuticals Azure Container Apps POC platform IaC, GitHub Actions CI/CD, rollback workflow, two dummy reference applications (PureOTA and HelixBridge), and clean-redeployment tooling.
+This repository contains the reproducible Arrowhead Azure Container Apps POC platform: Azure Bicep infrastructure, GitHub Actions CI/CD, rollback, PureOTA/HelixBridge reference applications, managed PostgreSQL connectivity, Azure Files persistence, Key Vault and Entra authentication.
 
-## Repository structure
+## Authentication model
 
-- `infrastructure/` — Azure Bicep modules, deployment, validation and cleanup scripts.
-- `apps/` — dummy reference application source and application configuration.
-- `.github/workflows/` — CI/CD and rollback workflows.
-- `platform.json` — shared platform identifiers used by GitHub Actions.
+- Local deployment authentication: **Azure CLI `az login` only**.
+- GitHub Actions authentication: **OIDC** using `NANDA-id-github-actions`.
+- No GitHub CLI is required.
+- No long-lived Azure client secret is required.
 
-## Clean deployment lifecycle
+## Clean deployment
 
-### 1. One-time local prerequisites
-
-- Azure CLI + Bicep
-- Windows PowerShell
-- Azure login: `az login`
-
-Using the authenticated GitHub CLI, the deployment script derives the immutable GitHub OIDC repository subject from GitHub repository metadata. Repository owner/repository numeric IDs are therefore not hard-coded in the IaC.
-
-### 2. Deploy
+From the repository root:
 
 ```powershell
+az login
 cd infrastructure
 .\deploy-lab.ps1
 ```
 
-The script:
+The deployment is intentionally split into two Bicep deployments:
 
-1. Validates Azure CLI/Bicep.
-2. Creates the resource group if it is needed for recovery.
-3. Recovers `NANDA-kv-aca-test19` if it is soft-deleted.
-4. Resolves the GitHub immutable OIDC subject.
-5. Deploys the foundation from Bicep, including PostgreSQL creation, private endpoints/DNS, ACA, Azure Files, identities, Key Vault, monitoring and GitHub OIDC.
-6. Bootstraps Key Vault and Microsoft Entra configuration.
-7. Deploys the runtime resources.
-9. Automatically updates the GitHub Actions secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`.
-11. Reports success only if validation passes.
+1. **Foundation** — resource group, VNet/subnets, Private DNS, Log Analytics, ACR, Key Vault, PostgreSQL, PostgreSQL private endpoint, Azure Files, storage private endpoint, ACA environment, managed identities, GitHub OIDC identity, Defender and budget.
+2. **Runtime** — PureOTA, HelixBridge, PureOTA ACA Job, Easy Auth, scoped Key Vault RBAC and Azure Monitor alerts.
 
-The PostgreSQL server is a real Bicep resource; it is not an `existing` reference. This is required for clean-room deployment.
+The script also:
 
-### 3. Validate independently
+- validates both Bicep files before deployment;
+- waits for PostgreSQL to become `Ready`;
+- creates/reuses the Entra groups and app registrations idempotently;
+- grants the GitHub Actions identity **Reader**, **Container Apps Contributor** and **Container Apps Jobs Contributor** at resource-group scope through Bicep;
+- bootstraps PostgreSQL Entra roles for the PureOTA and HelixBridge managed identities from inside the VNet-integrated ACA environment;
+- creates the shared `arrowhead` database and application schemas;
+- removes the temporary PostgreSQL bootstrap Job after successful configuration;
+- prints explicit phase/progress messages so a clean rebuild is understandable.
 
-```powershell
-.\validate-deployment.ps1
+The PostgreSQL bootstrap uses a short-lived Microsoft Entra access token from the signed-in operator. The token is placed only in a temporary ACA Job secret, is not written to source, and the Job is deleted after bootstrap.
+
+## Database connectivity
+
+The ACR does **not** connect to PostgreSQL. ACR stores container images and is accessed by ACA using the application/job managed identities.
+
+The database path is:
+
+```text
+PureOTA ACA App
+   -> NANDA-id-pureota
+   -> Microsoft Entra token
+   -> Private PostgreSQL endpoint
+   -> arrowhead database / pureota schema
+
+HelixBridge ACA App
+   -> NANDA-id-helixbridge
+   -> Microsoft Entra token
+   -> Private PostgreSQL endpoint
+   -> arrowhead database / helixbridge schema
+
+PureOTA ACA Job
+   -> NANDA-id-pureota
+   -> Microsoft Entra token
+   -> Private PostgreSQL endpoint
+   -> arrowhead database / pureota schema
 ```
 
-The validation is read-only and checks the major acceptance prerequisites: internal ACA environment, ACR security, Key Vault security, PostgreSQL readiness/private access, Azure Files, ACA apps/jobs/storage binding, GitHub OIDC, Key Vault bootstrap secrets and persistent Azure Files storage.
+Both application images perform a real PostgreSQL `SELECT 1` connection check using their user-assigned managed identity before nginx starts. The PureOTA CI/CD Job performs the same check before its normal job validation.
 
-### 4. Cleanly delete the lab
+No PostgreSQL password is placed in application environment variables or container images.
 
 ## GitHub Actions
 
@@ -58,31 +75,49 @@ Required repository secrets:
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 
-`deploy-lab.ps1` updates these automatically after a clean rebuild.
+The deployment script prints the GitHub Actions client ID after a clean rebuild so the repository secrets can be updated manually.
 
-Authentication uses GitHub OIDC; no Azure client secret is stored in GitHub.
+The CI/CD flow is:
 
-Create a GitHub Environment named `production` with the required reviewer approval rule.
+```text
+Git push to main
+  -> changed-application detection
+  -> build full-SHA image
+  -> push to ACR
+  -> deploy new ACA revision
+  -> keep old revision serving
+  -> health gate
+  -> production approval
+  -> PureOTA Job validation
+  -> promote validated revision
+```
 
-The deployment workflow:
-
-1. Builds immutable full-SHA images.
-2. Pushes them to ACR.
-3. Creates a new ACA revision.
-4. Keeps the current revision serving while the new revision is health-gated.
-5. Requests production approval.
-6. Runs the PureOTA ACA Job when configured.
-7. Promotes the validated revision to 100%.
-8. Rolls back automatically if deployment health validation fails.
-
-ACA uses an internal VNet-integrated environment. Container App ingress is enabled inside that internal environment so VNet/corporate clients can reach the applications.
+A manual **Run workflow** is an explicit deployment request and therefore creates a new immutable SHA image/revision for the selected application. A normal push only selects applications whose configured source path changed.
 
 ## Rollback
 
-Use `ACA Rollback` with the application and full Git commit SHA. The workflow verifies that the target image and corresponding ACA revision exist and are healthy before assigning 100% traffic to that revision.
+Use `.github/workflows/rollback.yml` to select a previously deployed full Git SHA. The workflow verifies the image/revision and health before assigning 100% traffic to the target revision.
 
 ## Security
 
-Do not commit passwords, client secrets, access tokens, generated deployment outputs, or local environment files. Runtime application secrets are sourced from Azure Key Vault.
+- ACR admin access is disabled.
+- ACA applications/jobs use user-assigned managed identities for ACR pulls.
+- GitHub Actions uses OIDC and ACR push permissions.
+- Key Vault uses RBAC, soft delete and purge protection.
+- PostgreSQL uses private access and Microsoft Entra authentication.
+- PostgreSQL application identities are non-admin database roles.
+- Application secrets are not committed to source or baked into images.
+- The PostgreSQL access token is obtained at runtime from the ACA managed identity endpoint and used only as the transient `psql` password.
 
-The dummy applications are platform bootstrap applications only. Real PureOTA database schema/migrations, workload sizing, concurrent-write validation, PITR restore testing, file restore testing, secret rotation testing and third-application onboarding remain acceptance activities when the real application and customer inputs are available.
+## Repository structure
+
+- `infrastructure/` — Bicep modules and clean deployment/cleanup tooling.
+- `apps/` — PureOTA and HelixBridge reference applications.
+- `.github/workflows/aca-ci-cd.yml` — multi-app CI/CD.
+- `.github/workflows/rollback.yml` — controlled rollback.
+- `apps/apps.json` — application build/deployment configuration.
+- `platform.json` — shared Azure platform identifiers.
+
+## Customer-specific/deferred work
+
+The real PureOTA application, real schema migrations, production workload sizing, PITR restore demonstration, file restore demonstration, secret rotation demonstration, third-app onboarding and final corporate DNS/Cato/SANDC01 integration remain customer acceptance activities when the corresponding production inputs are available.
