@@ -1,26 +1,27 @@
-﻿<#!
+<#
 .SYNOPSIS
-Fresh, reusable deployment for the Arrowhead Container Apps POC platform. Azure authentication uses Azure CLI only.
+Fresh, reusable deployment for the Arrowhead Container Apps POC platform.
 
 .DESCRIPTION
-The script intentionally uses two Azure deployments:
-  1. Foundation: network, Log Analytics, ACR, Key Vault, PostgreSQL, Azure Files,
-     private endpoints/DNS, ACA environment, Defender and GitHub OIDC identity.
-  2. Runtime: after secrets and Entra configuration exist, deploys the two dummy reference apps,
-     PureOTA ACA Job, Easy Auth, scoped Key Vault RBAC and Azure Monitor alerts.
+Application onboarding is configuration-driven through apps/apps.json.
+The deployment is staged inside one reusable script:
+  1. Foundation: shared Azure platform.
+  2. Application prerequisites: managed identities, Entra groups/apps and Key Vault secrets/RBAC.
+  3. PostgreSQL bootstrap: application managed identities and least-privilege schemas.
+  4. Runtime: ACA apps, Easy Auth, Azure Files bindings, optional ACA Jobs and monitoring.
 
-Cato/SANDC01 changes are not performed by this script. Those are customer IT actions.
-The acceptance/validation script is intentionally not included in this POC package.
+Azure authentication uses Azure CLI/OIDC. No GitHub CLI is required.
 #>
 
 [CmdletBinding()]
 param(
     [string]$Location = 'westus',
-    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca-test',
+    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca-test11',
     [string]$GithubRepository = 'Nands78gwejdfwsf/nanda-arrowhead-aca',
     [string]$NotificationEmail = 'Nandan.NK@Stratogent.com',
     [string]$EntraOperatorObjectId,
-    [SecureString]$PostgreSqlPassword
+    [SecureString]$PostgreSqlPassword,
+    [switch]$FoundationOnly
 )
 
 Set-StrictMode -Version Latest
@@ -29,48 +30,163 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $FoundationBicep = Join-Path $Root 'main.bicep'
 $RuntimeBicep = Join-Path $Root 'runtime.bicep'
+$AppsConfigPath = Join-Path $Root '..\apps\apps.json'
 
 # ---------------------------------------------------------------------------
-# CANONICAL RESOURCE NAMES
-# This is the single naming source of truth for the deployment.
-# main.bicep and runtime.bicep receive these values as parameters.
+# PLATFORM CONFIGURATION
+# These are shared platform resources. Application-specific values belong in
+# apps/apps.json and must not be duplicated here.
 # ---------------------------------------------------------------------------
-$VnetName = 'NANDA-vnet-arrowhead-aca-test'
+$VnetName = 'NANDA-vnet-arrowhead-aca-test11'
 $AcaSubnetName = 'NANDA-snet-aca'
 $PrivateEndpointSubnetName = 'NANDA-snet-private-endpoint'
 $LogAnalyticsWorkspaceName = 'NANDA-law-arrowhead-aca-test'
 $AcrName = 'nandaacrarrowheadaca'
-$KeyVaultName = 'NANDA-kv-aca-test33'
+$KeyVaultName = 'NANDA-kv-aca-test38'
 $PostgreSqlServerName = 'nanda-pg-aca-test'
-$EnvironmentName = 'NANDA-cae-arrowhead-aca-test'
-$StorageAccountName = 'nandastpureotaaca'
-$FileShareName = 'pureota-data'
-$PureotaIdentityName = 'NANDA-id-pureota'
-$HelixIdentityName = 'NANDA-id-helixbridge'
+$StorageAccountName = 'nandastarrowheadaca'
 $StorageIdentityName = 'NANDA-id-aca-storage'
+$EnvironmentName = 'NANDA-cae-arrowhead-aca-test11'
 $GithubIdentityName = 'NANDA-id-github-actions'
-$PureotaAppName = 'nanda-ca-pureota'
-$HelixAppName = 'nanda-ca-helixbridge'
-$PureotaJobName = 'nanda-job-pureota'
-$StorageBindingName = 'nanda-pureota-storage'
-$StorageKeySecretName = 'pureota-storage-key'
-$PureotaAuthSecretName = 'pureota-entra-client-secret'
-$HelixAuthSecretName = 'helixbridge-entra-client-secret'
-$AzureFilesBackupVaultName = 'NANDA-rsv-arrowhead-aca-files12'
-$AzureFilesBackupPolicyName = 'NANDA-afs-daily-30d'
 $BudgetName = 'NANDA-budget-arrowhead-aca-test'
 $AcrPrivateEndpointName = 'NANDA-pe-acr-arrowhead-aca'
 $KeyVaultPrivateEndpointName = 'NANDA-pe-keyvault-aca'
 $PostgresPrivateEndpointName = 'NANDA-pe-postgresql-aca'
-$StoragePrivateEndpointName = 'NANDA-pe-pureota-storage'
-$PostgreSqlDatabaseName = 'arrowhead'
+$RecoveryServicesVaultName = 'NANDA-rsv-arrowhead-aca-files12'
+$AzureFilesBackupPolicyName = 'NANDA-afs-daily-30d'
 $MonitoringActionGroupName = 'NANDA-ag-aca-platform'
 $MonthlyBudgetAmount = 100
 $PostgresAdminGroupName = 'NANDA-PureOTA-PostgreSQL-Admins'
-$PureotaGroupName = 'NANDA-PureOTA-Users'
-$HelixGroupName = 'NANDA-HelixBridge-Users'
-$PureotaAppRegistrationName = 'NANDA-PureOTA-ACA-Test'
-$HelixAppRegistrationName = 'NANDA-HelixBridge-ACA-Test'
+
+function Get-AppConfig {
+    if (-not (Test-Path -LiteralPath $AppsConfigPath)) { throw "Application configuration not found: $AppsConfigPath" }
+    try { $config = Get-Content -LiteralPath $AppsConfigPath -Raw | ConvertFrom-Json }
+    catch { throw "apps.json is not valid JSON: $($_.Exception.Message)" }
+    if ($null -eq $config.applications) { throw "apps.json must contain an 'applications' object." }
+
+    $apps = @{}
+    foreach ($property in $config.applications.PSObject.Properties) {
+        $raw = $property.Value
+        if (-not [bool]$raw.enabled) { continue }
+
+        if ($null -eq $raw.PSObject.Properties['azure']) { throw "Enabled application '$($property.Name)' is missing the 'azure' object in apps.json." }
+        if ([string]::IsNullOrWhiteSpace([string]$raw.azure.managedIdentityName)) { throw "Enabled application '$($property.Name)' has no managed identity name." }
+        if ([string]::IsNullOrWhiteSpace([string]$raw.azure.containerAppName)) { throw "Enabled application '$($property.Name)' has no container app name." }
+        if ([string]::IsNullOrWhiteSpace([string]$raw.azure.entraGroupName)) { throw "Enabled application '$($property.Name)' has no Entra group name." }
+        if ([string]::IsNullOrWhiteSpace([string]$raw.azure.appRegistrationName)) { throw "Enabled application '$($property.Name)' has no Entra application registration name." }
+        if ($null -eq $raw.PSObject.Properties['source']) { throw "Enabled application '$($property.Name)' is missing the 'source' object in apps.json." }
+        if ($null -eq $raw.PSObject.Properties['runtime']) { throw "Enabled application '$($property.Name)' is missing the 'runtime' object in apps.json." }
+        if ($null -eq $raw.PSObject.Properties['database']) { throw "Enabled application '$($property.Name)' is missing the 'database' object in apps.json." }
+        if ($null -eq $raw.PSObject.Properties['keyVault']) { throw "Enabled application '$($property.Name)' is missing the 'keyVault' object in apps.json." }
+        if ($null -eq $raw.PSObject.Properties['storage']) { throw "Enabled application '$($property.Name)' is missing the 'storage' object in apps.json." }
+        if ($null -eq $raw.PSObject.Properties['job']) { throw "Enabled application '$($property.Name)' is missing the 'job' object in apps.json." }
+
+        if ([bool]$raw.database.enabled -and [string]::IsNullOrWhiteSpace([string]$raw.database.databaseName)) {
+            throw "Enabled application '$($property.Name)' has database.enabled=true but no databaseName."
+        }
+        if ([bool]$raw.database.enabled -and [string]::IsNullOrWhiteSpace([string]$raw.database.schemaName)) {
+            throw "Enabled application '$($property.Name)' has database.enabled=true but no schemaName."
+        }
+        if ([bool]$raw.storage.enabled) {
+            if ([string]::IsNullOrWhiteSpace([string]$raw.storage.accountName)) { throw "Enabled application '$($property.Name)' has storage enabled but no accountName." }
+            if ([string]::IsNullOrWhiteSpace([string]$raw.storage.fileShareName)) { throw "Enabled application '$($property.Name)' has storage enabled but no fileShareName." }
+            if ([string]::IsNullOrWhiteSpace([string]$raw.storage.mountPath)) { throw "Enabled application '$($property.Name)' has storage enabled but no mountPath." }
+        }
+        if ([bool]$raw.job.enabled -and [string]::IsNullOrWhiteSpace([string]$raw.job.jobName)) {
+            throw "Enabled application '$($property.Name)' has job.enabled=true but no jobName."
+        }
+
+        # Normalize the current apps.json schema to the flat internal shape consumed
+        # by the runtime Bicep/modules. This keeps apps.json clean and configuration-driven.
+        $readAuthSecret = $true
+        if ($null -ne $raw.keyVault.PSObject.Properties['readAuthSecret']) {
+            $readAuthSecret = [bool]$raw.keyVault.readAuthSecret
+        }
+        $readStorageKeySecret = [bool]$raw.storage.enabled
+        if ($null -ne $raw.keyVault.PSObject.Properties['readStorageKeySecret']) {
+            $readStorageKeySecret = [bool]$raw.keyVault.readStorageKeySecret
+        }
+
+        $storageBindingName = ''
+        if ([bool]$raw.storage.enabled) {
+            $storageBindingName = [string]$raw.storage.fileShareName
+            if ($null -ne $raw.storage.PSObject.Properties['bindingName'] -and -not [string]::IsNullOrWhiteSpace([string]$raw.storage.bindingName)) {
+                $storageBindingName = [string]$raw.storage.bindingName
+            }
+        }
+
+        $transport = 'auto'
+        if ($null -ne $raw.runtime.PSObject.Properties['ingressTransport'] -and -not [string]::IsNullOrWhiteSpace([string]$raw.runtime.ingressTransport)) {
+            $transport = [string]$raw.runtime.ingressTransport
+        }
+
+        $app = [ordered]@{
+            enabled = $true
+            displayName = [string]$raw.displayName
+            identity = [ordered]@{ name = [string]$raw.azure.managedIdentityName }
+            containerAppName = [string]$raw.azure.containerAppName
+            imageName = [string]$raw.source.imageName
+            buildContext = [string]$raw.source.buildContext
+            dockerfile = [string]$raw.source.dockerfile
+            targetPort = [int]$raw.runtime.targetPort
+            healthPath = [string]$raw.runtime.healthPath
+            minReplicas = [int]$raw.runtime.minReplicas
+            maxReplicas = [int]$raw.runtime.maxReplicas
+            ingress = [ordered]@{
+                external = [bool]$raw.runtime.ingressExternal
+                transport = $transport
+            }
+            entra = [ordered]@{
+                groupName = [string]$raw.azure.entraGroupName
+                applicationName = [string]$raw.azure.appRegistrationName
+                redirectPath = '/.auth/login/aad/callback'
+            }
+            keyVault = [ordered]@{
+                authSecretName = [string]$raw.keyVault.authSecretName
+                storageKeySecretName = [string]$raw.keyVault.storageKeySecretName
+                readAuthSecret = $readAuthSecret
+                readStorageKeySecret = $readStorageKeySecret
+            }
+            postgres = [ordered]@{
+                enabled = [bool]$raw.database.enabled
+                databaseName = [string]$raw.database.databaseName
+                schemaName = [string]$raw.database.schemaName
+            }
+            storage = [ordered]@{
+                enabled = [bool]$raw.storage.enabled
+                accountName = [string]$raw.storage.accountName
+                fileShareName = [string]$raw.storage.fileShareName
+                bindingName = $storageBindingName
+                mountPath = [string]$raw.storage.mountPath
+            }
+            job = [ordered]@{
+                enabled = [bool]$raw.job.enabled
+                jobName = [string]$raw.job.jobName
+                command = [string]$raw.job.command
+            }
+        }
+
+        $apps[$property.Name] = [pscustomobject]$app
+    }
+
+    if ($apps.Count -eq 0) { throw 'apps.json contains no enabled applications.' }
+    return $apps
+}
+
+if ($FoundationOnly) {
+    $Apps = @{}
+} else {
+    $Apps = Get-AppConfig
+}
+
+if (-not $FoundationOnly) {
+    $enabledApplications = @($Apps.GetEnumerator() | Where-Object { $_.Value.enabled } | ForEach-Object { [ordered]@{ key = $_.Key; value = $_.Value } })
+    $storageApplications = @($Apps.GetEnumerator() | Where-Object { $_.Value.enabled -and $_.Value.storage.enabled } | ForEach-Object { [ordered]@{ key = $_.Key; value = $_.Value } })
+    $jobApplications = @($Apps.GetEnumerator() | Where-Object { $_.Value.enabled -and $_.Value.job.enabled } | ForEach-Object { [ordered]@{ key = $_.Key; value = $_.Value } })
+    $authApplications = @($Apps.GetEnumerator() | Where-Object { $_.Value.enabled -and $_.Value.keyVault.readAuthSecret } | ForEach-Object { [ordered]@{ key = $_.Key; value = $_.Value } })
+    $storageApps = @($Apps.GetEnumerator() | Where-Object { $_.Value.enabled -and $_.Value.storage.enabled })
+    $postgresApps = @($Apps.GetEnumerator() | Where-Object { $_.Value.enabled -and $_.Value.postgres.enabled })
+}
 
 $storageKey = $null
 $plainPassword = $null
@@ -171,140 +287,111 @@ function Get-OperatorObjectId {
     throw 'Could not determine the signed-in Entra user object ID. Re-run with -EntraOperatorObjectId <object-id>.'
 }
 
+function New-DeploymentParameterFile([hashtable]$Values) {
+    $file = Join-Path $env:TEMP ("arrowhead-deployment-" + [guid]::NewGuid().ToString('N') + '.json')
+    $parameterObject = @{ '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion = '1.0.0'; parameters = @{} }
+    foreach ($key in $Values.Keys) { $parameterObject.parameters[$key] = @{ value = $Values[$key] } }
+    $parameterObject | ConvertTo-Json -Depth 50 | Set-Content -LiteralPath $file -Encoding utf8
+    return $file
+}
+
 function Invoke-FoundationDeployment([string]$Password) {
     Write-Step 'PHASE 1 - Deploy Foundation'
-    Write-Host 'Deploying network, logging, managed identities, ACR/private connectivity, Key Vault, PostgreSQL/private connectivity, Azure Files, ACA environment, Defender and budget...' -ForegroundColor Yellow
+    Write-Host 'Deploying shared platform only: network, logging, ACR, Key Vault, PostgreSQL, private connectivity, ACA environment, GitHub OIDC and platform monitoring dependencies...' -ForegroundColor Yellow
 
-    az deployment sub create `
-        --location $Location `
-        --template-file $FoundationBicep `
-        --parameters `
-            resourceGroupName=$ResourceGroupName `
-            githubRepositorySubjectPrefix=$githubRepositorySubjectPrefix `
-            postgresqlAdministratorLoginPassword=$Password `
-            notificationEmail=$NotificationEmail `
-            monthlyBudgetAmount=$MonthlyBudgetAmount `
-            budgetStartDate=$budgetStartDate `
-            vnetName=$VnetName `
-            acaSubnetName=$AcaSubnetName `
-            privateEndpointSubnetName=$PrivateEndpointSubnetName `
-            logAnalyticsWorkspaceName=$LogAnalyticsWorkspaceName `
-            acrName=$AcrName `
-            keyVaultName=$KeyVaultName `
-            postgresqlServerName=$PostgreSqlServerName `
-            containerAppsEnvironmentName=$EnvironmentName `
-            pureotaStorageAccountName=$StorageAccountName `
-            pureotaFileShareName=$FileShareName `
-            pureotaIdentityName=$PureotaIdentityName `
-            helixIdentityName=$HelixIdentityName `
-            storageIdentityName=$StorageIdentityName `
-            githubIdentityName=$GithubIdentityName `
-            pureotaAppName=$PureotaAppName `
-            helixAppName=$HelixAppName `
-            pureotaJobName=$PureotaJobName `
-            storageBindingName=$StorageBindingName `
-            pureotaStorageKeySecretName=$StorageKeySecretName `
-            pureotaAuthSecretName=$PureotaAuthSecretName `
-            helixAuthSecretName=$HelixAuthSecretName `
-            azureFilesBackupVaultName=$AzureFilesBackupVaultName `
-            azureFilesBackupPolicyName=$AzureFilesBackupPolicyName `
-            azureFilesBackupScheduleRunTimeUtc='2026-01-01T02:00:00Z' `
-            azureFilesBackupRetentionDays=30 `
-            budgetName=$BudgetName `
-            acrPrivateEndpointName=$AcrPrivateEndpointName `
-            keyVaultPrivateEndpointName=$KeyVaultPrivateEndpointName `
-            postgresPrivateEndpointName=$PostgresPrivateEndpointName `
-            storagePrivateEndpointName=$StoragePrivateEndpointName `
-        --only-show-errors `
-        --output none
-
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Foundation Bicep deployment failed.'
+    $parameterFile = New-DeploymentParameterFile -Values @{}
+    try {
+        az deployment sub create `
+            --location $Location `
+            --template-file $FoundationBicep `
+            --parameters "@$parameterFile" `
+            --parameters `
+                resourceGroupName=$ResourceGroupName `
+                githubRepositorySubjectPrefix=$githubRepositorySubjectPrefix `
+                postgresqlAdministratorLoginPassword=$Password `
+                notificationEmail=$NotificationEmail `
+                monthlyBudgetAmount=$MonthlyBudgetAmount `
+                budgetStartDate=$budgetStartDate `
+                vnetName=$VnetName `
+                acaSubnetName=$AcaSubnetName `
+                privateEndpointSubnetName=$PrivateEndpointSubnetName `
+                logAnalyticsWorkspaceName=$LogAnalyticsWorkspaceName `
+                acrName=$AcrName `
+                keyVaultName=$KeyVaultName `
+                postgresqlServerName=$PostgreSqlServerName `
+                storageAccountName=$StorageAccountName `
+                containerAppsEnvironmentName=$EnvironmentName `
+                githubIdentityName=$GithubIdentityName `
+                storageIdentityName=$StorageIdentityName `
+                budgetName=$BudgetName `
+acrPrivateEndpointName=$AcrPrivateEndpointName `
+keyVaultPrivateEndpointName=$KeyVaultPrivateEndpointName `
+postgresPrivateEndpointName=$PostgresPrivateEndpointName `
+            --only-show-errors `
+            --output none
+        if ($LASTEXITCODE -ne 0) { throw 'Foundation Bicep deployment failed.' }
+    }
+    finally {
+        Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
     }
 
-    # PostgreSQL must be Ready before any runtime resource references it.
     for ($attempt = 1; $attempt -le 36; $attempt++) {
-        $state = az postgres flexible-server show `
-            --resource-group $ResourceGroupName `
-            --name $PostgreSqlServerName `
-            --query state `
-            -o tsv `
-            --only-show-errors 2>$null
-
-        if ($LASTEXITCODE -eq 0 -and $state -eq 'Ready') {
-            Write-Host 'PostgreSQL is Ready.' -ForegroundColor Green
-            return
-        }
-
+        $state = az postgres flexible-server show --resource-group $ResourceGroupName --name $PostgreSqlServerName --query state -o tsv --only-show-errors 2>$null
+        if ($LASTEXITCODE -eq 0 -and $state -eq 'Ready') { Write-Host 'PostgreSQL is Ready.' -ForegroundColor Green; return }
         Write-Host "Waiting for PostgreSQL to become Ready... attempt $attempt/36 (state=$state)" -ForegroundColor Yellow
         Start-Sleep -Seconds 10
     }
-
     throw 'PostgreSQL did not reach Ready state after foundation deployment.'
 }
 
 function Invoke-RuntimeDeployment(
-    [string]$PureotaGroupId,
-    [string]$PureotaClientId,
-    [string]$HelixGroupId,
-    [string]$HelixClientId,
-    [string]$PostgresAdminGroupId
+    [string]$PostgresAdminGroupId,
+    [hashtable]$EntraMetadata
 ) {
-    Write-Step 'PHASE 3 - Deploy Runtime and Monitoring'
-    Write-Host 'Deploying PureOTA, HelixBridge, PureOTA Job, Easy Auth, Key Vault RBAC and Azure Monitor alerts...' -ForegroundColor Yellow
+    Write-Step 'PHASE 4 - Deploy Application Runtime'
+    Write-Host 'Deploying configured ACA applications, Easy Auth, Azure Files bindings, optional ACA Jobs and monitoring...' -ForegroundColor Yellow
 
-    az deployment group create `
-        --resource-group $ResourceGroupName `
-        --template-file $RuntimeBicep `
-        --parameters `
-            location=$Location `
-            resourceGroupName=$ResourceGroupName `
-            pureotaEntraGroupObjectId=$PureotaGroupId `
-            pureotaEntraClientId=$PureotaClientId `
-            helixbridgeEntraGroupObjectId=$HelixGroupId `
-            helixbridgeEntraClientId=$HelixClientId `
-            postgresqlEntraAdministratorObjectId=$PostgresAdminGroupId `
-            postgresqlEntraAdministratorName=$PostgresAdminGroupName `
-            tenantId=$TenantId `
-            notificationEmail=$NotificationEmail `
-            acrName=$AcrName `
-            keyVaultName=$KeyVaultName `
-            postgresqlServerName=$PostgreSqlServerName `
-            containerAppsEnvironmentName=$EnvironmentName `
-            pureotaStorageAccountName=$StorageAccountName `
-            pureotaFileShareName=$FileShareName `
-            pureotaIdentityName=$PureotaIdentityName `
-            helixIdentityName=$HelixIdentityName `
-            storageIdentityName=$StorageIdentityName `
-            githubIdentityName=$GithubIdentityName `
-            pureotaAppName=$PureotaAppName `
-            helixAppName=$HelixAppName `
-            pureotaJobName=$PureotaJobName `
-            storageBindingName=$StorageBindingName `
-            pureotaStorageKeySecretName=$StorageKeySecretName `
-            pureotaAuthSecretName=$PureotaAuthSecretName `
-            helixAuthSecretName=$HelixAuthSecretName `
-            logAnalyticsWorkspaceName=$LogAnalyticsWorkspaceName `
-            postgresDatabaseName=$PostgreSqlDatabaseName `
-            monitoringActionGroupName=$MonitoringActionGroupName `
-        --only-show-errors `
-        --output none
-
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Runtime Bicep deployment failed.'
+    $parameterFile = New-DeploymentParameterFile -Values @{
+        enabledApplications = $enabledApplications
+        storageApplications = $storageApplications
+        jobApplications = $jobApplications
+        authApplications = $authApplications
+        entraMetadata = $EntraMetadata
+    }
+    try {
+        az deployment group create `
+            --resource-group $ResourceGroupName `
+            --template-file $RuntimeBicep `
+            --parameters "@$parameterFile" `
+            --parameters `
+                location=$Location `
+                postgresqlEntraAdministratorObjectId=$PostgresAdminGroupId `
+                postgresqlEntraAdministratorName=$PostgresAdminGroupName `
+                tenantId=$TenantId `
+                notificationEmail=$NotificationEmail `
+                acrName=$AcrName `
+                keyVaultName=$KeyVaultName `
+                postgresqlServerName=$PostgreSqlServerName `
+                containerAppsEnvironmentName=$EnvironmentName `
+                storageIdentityName=$StorageIdentityName `
+                githubIdentityName=$GithubIdentityName `
+                logAnalyticsWorkspaceName=$LogAnalyticsWorkspaceName `
+                monitoringActionGroupName=$MonitoringActionGroupName `
+            --only-show-errors `
+            --output none
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime Bicep deployment failed.' }
+    }
+    finally {
+        Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
     }
 }
 
-function Get-StorageKey {
-    Write-Step 'PHASE 2 - Retrieve Azure Files Key'
+function Get-StorageKey([string]$StorageAccountName) {
     $key = az storage account keys list `
         --resource-group $ResourceGroupName `
         --account-name $StorageAccountName `
         --query '[0].value' -o tsv --only-show-errors
-
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($key)) {
-        throw 'Could not retrieve the Azure Files storage account key.'
-    }
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($key)) { throw "Could not retrieve the Azure Files storage account key '$StorageAccountName'." }
     return $key.Trim()
 }
 
@@ -325,6 +412,52 @@ function Ensure-KeyVaultSecret([string]$Name, [string]$Value) {
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to write Key Vault secret '$Name'."
     }
+}
+
+function Ensure-KeyVaultSecretAccess([string]$PrincipalId, [string]$SecretName) {
+    if ([string]::IsNullOrWhiteSpace($PrincipalId)) { throw "Cannot assign Key Vault access because the principal ID is empty." }
+    if ([string]::IsNullOrWhiteSpace($SecretName)) { throw "Cannot assign Key Vault access because the secret name is empty." }
+
+    $vaultId = az keyvault show `
+        --name $KeyVaultName `
+        --resource-group $ResourceGroupName `
+        --query id `
+        -o tsv `
+        --only-show-errors
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vaultId)) {
+        throw "Could not retrieve Key Vault '$KeyVaultName' resource ID."
+    }
+
+    $scope = "$vaultId/secrets/$SecretName"
+    $secretRoleId = '4633458b-17de-408a-b874-0445c86b69e6' # Key Vault Secrets User
+    $existing = @(az role assignment list `
+        --scope $scope `
+        --assignee-object-id $PrincipalId `
+        --role $secretRoleId `
+        --query '[].id' `
+        -o tsv `
+        --only-show-errors)
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not check Key Vault access for secret '$SecretName'."
+    }
+
+    if ($existing.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$existing[0])) {
+        Write-Host "Key Vault Secrets User already assigned for '$SecretName'." -ForegroundColor Green
+        return
+    }
+
+    az role assignment create `
+        --assignee-object-id $PrincipalId `
+        --assignee-principal-type ServicePrincipal `
+        --role 'Key Vault Secrets User' `
+        --scope $scope `
+        --only-show-errors `
+        --output none
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to grant Key Vault Secrets User access to secret '$SecretName'."
+    }
+    Write-Host "Granted Key Vault Secrets User access to '$SecretName'." -ForegroundColor Green
 }
 
 function Ensure-KeyVaultOperatorAccess([string]$OperatorId) {
@@ -405,6 +538,39 @@ function Ensure-EntraGroup([string]$DisplayName, [string]$MailNickname, [string]
     }
 
     return $groupId.Trim()
+}
+
+function Ensure-AppManagedIdentity([string]$IdentityName) {
+    if ([string]::IsNullOrWhiteSpace($IdentityName)) {
+        throw 'Managed identity name cannot be empty.'
+    }
+
+    $principalId = az identity show `
+        --resource-group $ResourceGroupName `
+        --name $IdentityName `
+        --query principalId `
+        -o tsv `
+        --only-show-errors 2>$null
+
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($principalId)) {
+        Write-Host "Managed identity '$IdentityName' already exists." -ForegroundColor Green
+        return $principalId.Trim()
+    }
+
+    Write-Host "Creating managed identity '$IdentityName'..." -ForegroundColor Yellow
+    $principalId = az identity create `
+        --resource-group $ResourceGroupName `
+        --name $IdentityName `
+        --query principalId `
+        -o tsv `
+        --only-show-errors
+
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($principalId)) {
+        throw "Failed to create managed identity '$IdentityName'."
+    }
+
+    Write-Host "Managed identity '$IdentityName' created." -ForegroundColor Green
+    return $principalId.Trim()
 }
 
 function Ensure-EntraApplication(
@@ -808,12 +974,12 @@ function Ensure-PostgreSqlEntraAdministrator([string]$AdminGroupId) {
     Write-Host "PostgreSQL Microsoft Entra administrator verified: $PostgresAdminGroupName ($AdminGroupId)." -ForegroundColor Green
 }
 
-function Ensure-PostgreSqlManagedIdentityAccess(
-    [string]$PureotaIdentityPrincipalId,
-    [string]$HelixIdentityPrincipalId
-) {
+function Escape-SqlLiteral([string]$Value) { return $Value.Replace("'", "''") }
+function Escape-SqlIdentifier([string]$Value) { return $Value.Replace('"', '""') }
+
+function Ensure-PostgreSqlManagedIdentityAccess([hashtable]$PrincipalIds) {
     Write-Step 'PHASE 3 - Configure PostgreSQL Managed Identity Access'
-    Write-Host 'Preparing the PostgreSQL database and mapping both ACA managed identities as non-admin Entra roles.' -ForegroundColor Yellow
+    Write-Host 'Mapping configured ACA managed identities to PostgreSQL Entra roles and applying least-privilege schema grants.' -ForegroundColor Yellow
     Write-Host 'The bootstrap runs inside the VNet-integrated ACA environment because PostgreSQL public access is disabled.' -ForegroundColor Yellow
 
     $pgHost = az postgres flexible-server show `
@@ -827,26 +993,55 @@ function Ensure-PostgreSqlManagedIdentityAccess(
         throw 'Could not retrieve the PostgreSQL fully qualified domain name.'
     }
 
-    $sql = @'
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'NANDA-id-pureota') THEN
-    PERFORM pg_catalog.pgaadauth_create_principal_with_oid('NANDA-id-pureota', 'PUREOTA_PRINCIPAL_ID', 'service', false, false);
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'NANDA-id-helixbridge') THEN
-    PERFORM pg_catalog.pgaadauth_create_principal_with_oid('NANDA-id-helixbridge', 'HELIX_PRINCIPAL_ID', 'service', false, false);
-  END IF;
-END
-$$;
-'@
+    # Create every configured application MI as a PostgreSQL Entra service principal.
+    $roleStatements = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in $PrincipalIds.GetEnumerator()) {
+        $app = $Apps[$entry.Key]
+        $roleName = Escape-SqlIdentifier ([string]$app.identity.name)
+        $roleLiteral = Escape-SqlLiteral ([string]$app.identity.name)
+        $principalLiteral = Escape-SqlLiteral ([string]$entry.Value)
+        $roleStatements.Add("IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$roleLiteral') THEN PERFORM pg_catalog.pgaadauth_create_principal_with_oid('$roleLiteral', '$principalLiteral', 'service', false, false); END IF;")
+    }
+    $roleSql = "DO `$`$ BEGIN $($roleStatements -join ' ') END `$`$;"
 
-    $sql = $sql.Replace('PUREOTA_PRINCIPAL_ID', $PureotaIdentityPrincipalId).Replace('HELIX_PRINCIPAL_ID', $HelixIdentityPrincipalId)
+    # Database creation must happen outside a transaction, so the shell script
+    # checks/creates each configured database first, then executes grants.
+    $databaseSetupLines = New-Object System.Collections.Generic.List[string]
+    $databaseNames = @($postgresApps | ForEach-Object { [string]$_.Value.postgres.databaseName } | Select-Object -Unique)
+    foreach ($databaseName in $databaseNames) {
+        $dbLiteral = Escape-SqlLiteral $databaseName
+        $dbIdentifier = Escape-SqlIdentifier $databaseName
+        $databaseSetupLines.Add(('echo "Checking {0} database..."' -f $dbLiteral))
+        $databaseSetupLines.Add(('if [ "$(psql -Atqc "SELECT 1 FROM pg_database WHERE datname = ''{0}''")" != "1" ]; then createdb "{1}"; fi' -f $dbLiteral, $dbIdentifier))
+
+        $grantStatements = New-Object System.Collections.Generic.List[string]
+        foreach ($entry in $PrincipalIds.GetEnumerator()) {
+            $app = $Apps[$entry.Key]
+            if ($app.enabled -and $app.postgres.enabled -and ([string]$app.postgres.databaseName -eq $databaseName)) {
+                $role = Escape-SqlIdentifier ([string]$app.identity.name)
+                $schema = Escape-SqlIdentifier ([string]$app.postgres.schemaName)
+                $grantStatements.Add(('GRANT CONNECT ON DATABASE "{0}" TO "{1}"; CREATE SCHEMA IF NOT EXISTS "{2}" AUTHORIZATION "{1}"; GRANT USAGE, CREATE ON SCHEMA "{2}" TO "{1}";' -f $dbIdentifier, $role, $schema))
+            }
+        }
+
+        # Base64 avoids shell quoting issues and keeps SQL out of command-line
+        # parsing while the bootstrap Job is being created.
+        $grantSql = $grantStatements -join ' '
+        $grantSqlB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($grantSql))
+        $databaseSetupLines.Add(('printf ''%s'' ''{0}'' | base64 -d | psql -v ON_ERROR_STOP=1 -d "{1}"' -f $grantSqlB64, $dbIdentifier))
+    }
+
+    $bootstrapScript = @"
+set -eu
+
+echo "Starting PostgreSQL managed identity bootstrap..."
+printf '%s' "`$BOOTSTRAP_SQL_B64" | base64 -d | psql -v ON_ERROR_STOP=1
+$($databaseSetupLines -join "`n")
+echo "PostgreSQL managed identity bootstrap completed successfully."
+"@
 
     $bootstrapJob = 'nanda-pg-bootstrap'
     $adminToken = $null
-
-    $existingJob = $null
-
     try {
         $existingJob = az containerapp job list `
             --resource-group $ResourceGroupName `
@@ -854,47 +1049,27 @@ $$;
             --output tsv `
             --only-show-errors `
             2>$null
-    }
-    catch {
-        $existingJob = $null
-    }
 
-    if (-not [string]::IsNullOrWhiteSpace($existingJob)) {
-        Write-Host "Removing previous bootstrap Job '$bootstrapJob'..." -ForegroundColor Yellow
-
-        az containerapp job delete `
-            --name $bootstrapJob `
-            --resource-group $ResourceGroupName `
-            --yes `
-            --only-show-errors `
-            --output none
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not remove the previous PostgreSQL bootstrap Job '$bootstrapJob'."
+        if (-not [string]::IsNullOrWhiteSpace($existingJob)) {
+            az containerapp job delete `
+                --name $bootstrapJob `
+                --resource-group $ResourceGroupName `
+                --yes `
+                --only-show-errors `
+                --output none
+            if ($LASTEXITCODE -ne 0) { throw "Could not remove previous PostgreSQL bootstrap Job '$bootstrapJob'." }
         }
 
-        Write-Host "Previous PostgreSQL bootstrap Job removed." -ForegroundColor Green
-    }
-    else {
-        Write-Host "No previous PostgreSQL bootstrap Job found. Continuing..." -ForegroundColor Gray
-    }
-
-    try {
         for ($attempt = 1; $attempt -le 6; $attempt++) {
             Write-Host "Obtaining a fresh Entra token for PostgreSQL admin group (attempt $attempt/6)..." -ForegroundColor Yellow
-
             $adminToken = az account get-access-token `
                 --resource 'https://ossrdbms-aad.database.windows.net' `
                 --query accessToken `
                 --output tsv `
                 --only-show-errors
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($adminToken)) { throw 'Could not obtain a Microsoft Entra token for PostgreSQL.' }
 
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($adminToken)) {
-                throw 'Could not obtain a Microsoft Entra token for PostgreSQL.'
-            }
-
-            Write-Host "Creating temporary VNet bootstrap Job '$bootstrapJob'..." -ForegroundColor Yellow
-
+            $sqlB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($roleSql))
             az containerapp job create `
                 --name $bootstrapJob `
                 --resource-group $ResourceGroupName `
@@ -916,259 +1091,72 @@ $$;
                     "PGUSER=$PostgresAdminGroupName" `
                     'PGDATABASE=postgres' `
                     'PGSSLMODE=require' `
-                    "BOOTSTRAP_SQL_B64=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sql)))" `
+                    "BOOTSTRAP_SQL_B64=$sqlB64" `
                 --only-show-errors `
                 --output none
-
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Failed to create the PostgreSQL bootstrap Job.'
-            }
-
-            # The installed Azure CLI/containerapp extension on this host does not
-            # reliably persist --command/--args on Job create/update. Use the
-            # Container Apps REST API to patch the container command explicitly.
-            Write-Host 'Applying PostgreSQL client command through the Container Apps REST API...' -ForegroundColor Yellow
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create the PostgreSQL bootstrap Job.' }
 
             $jobJson = az containerapp job show `
                 --name $bootstrapJob `
                 --resource-group $ResourceGroupName `
                 --output json `
                 --only-show-errors
-
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($jobJson)) {
-                throw 'Could not read the PostgreSQL bootstrap Job before applying the command override.'
-            }
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($jobJson)) { throw 'Could not read the PostgreSQL bootstrap Job before applying the command override.' }
 
             $jobObject = $jobJson | ConvertFrom-Json
             $container = $jobObject.properties.template.containers[0]
-
-$bootstrapScript = @'
-set -eu
-
-echo "Starting PostgreSQL managed identity bootstrap..."
-
-printf '%s' "$BOOTSTRAP_SQL_B64" | base64 -d | psql -v ON_ERROR_STOP=1
-
-echo "Checking arrowhead database..."
-
-if [ "$(psql -Atqc "SELECT 1 FROM pg_database WHERE datname = 'arrowhead'")" != "1" ]; then
-    echo "Creating arrowhead database..."
-    createdb arrowhead
-fi
-
-echo "Configuring database permissions..."
-
-psql -v ON_ERROR_STOP=1 -d arrowhead -c "GRANT CONNECT ON DATABASE arrowhead TO \"NANDA-id-pureota\", \"NANDA-id-helixbridge\"; CREATE SCHEMA IF NOT EXISTS pureota AUTHORIZATION \"NANDA-id-pureota\"; CREATE SCHEMA IF NOT EXISTS helixbridge AUTHORIZATION \"NANDA-id-helixbridge\"; GRANT USAGE, CREATE ON SCHEMA pureota TO \"NANDA-id-pureota\"; GRANT USAGE, CREATE ON SCHEMA helixbridge TO \"NANDA-id-helixbridge\";"
-
-echo "PostgreSQL managed identity bootstrap completed successfully."
-'@
-
             $container | Add-Member -MemberType NoteProperty -Name command -Value @('/bin/sh') -Force
             $container | Add-Member -MemberType NoteProperty -Name args -Value @('-c', $bootstrapScript) -Force
-
-            $patchBody = @{
-                properties = @{
-                    template = @{
-                        containers = @($container)
-                    }
-                }
-            } | ConvertTo-Json -Depth 30 -Compress
+            $patchBody = @{ properties = @{ template = @{ containers = @($container) } } } | ConvertTo-Json -Depth 30 -Compress
 
             $subscriptionId = az account show --query id --output tsv --only-show-errors
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($subscriptionId)) {
-                throw 'Could not determine the active Azure subscription ID.'
-            }
-
+            $managementToken = az account get-access-token --resource https://management.azure.com/ --query accessToken --output tsv --only-show-errors
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($managementToken)) { throw 'Could not obtain Azure management token for the PostgreSQL bootstrap REST PATCH.' }
             $jobUri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/jobs/${bootstrapJob}?api-version=2026-01-01"
+            Invoke-RestMethod -Method Patch -Uri $jobUri -Headers @{ Authorization = "Bearer $managementToken" } -ContentType 'application/json' -Body $patchBody -ErrorAction Stop | Out-Null
 
-            Write-Host 'Requesting Azure management token for REST PATCH...' -ForegroundColor Gray
-            $managementToken = az account get-access-token `
-                --resource https://management.azure.com/ `
-                --query accessToken `
-                --output tsv `
-                --only-show-errors
+            $verifyJobJson = az containerapp job show --name $bootstrapJob --resource-group $ResourceGroupName --output json --only-show-errors
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($verifyJobJson)) { throw 'Could not verify the PostgreSQL bootstrap Job.' }
+            $verifyJob = $verifyJobJson | ConvertFrom-Json
+            $configuredCommand = @($verifyJob.properties.template.containers[0].command)
+            $configuredArgs = @($verifyJob.properties.template.containers[0].args)
+            if ($configuredCommand.Count -ne 1 -or $configuredCommand[0] -ne '/bin/sh') { throw 'Azure did not persist the /bin/sh command override on the PostgreSQL bootstrap Job.' }
+            if ($configuredArgs.Count -lt 2 -or $configuredArgs[0] -ne '-c' -or [string]::IsNullOrWhiteSpace([string]$configuredArgs[1])) { throw 'Azure did not persist the expected PostgreSQL bootstrap command.' }
 
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($managementToken)) {
-                throw 'Could not obtain an Azure management access token for the PostgreSQL bootstrap REST PATCH.'
-            }
-
-            Write-Host 'Sending PostgreSQL bootstrap command to Azure Container Apps...' -ForegroundColor Gray
-            try {
-                Invoke-RestMethod `
-                    -Method Patch `
-                    -Uri $jobUri `
-                    -Headers @{ Authorization = "Bearer $managementToken" } `
-                    -ContentType 'application/json' `
-                    -Body $patchBody `
-                    -ErrorAction Stop | Out-Null
-            }
-            catch {
-                throw "Failed to apply the PostgreSQL bootstrap command through the Container Apps REST API: $($_.Exception.Message)"
-            }
-
-            Write-Host 'Verifying PostgreSQL bootstrap command...' -ForegroundColor Yellow
-
-            # Read the complete persisted container definition. Do not query a
-            # multiline shell argument through TSV: Azure CLI can flatten or
-            # omit multiline values in that mode.
-            $verifyJobJson = az containerapp job show `
-                --name $bootstrapJob `
-                --resource-group $ResourceGroupName `
-                --output json `
-                --only-show-errors
-
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($verifyJobJson)) {
-                throw 'Could not read the PostgreSQL bootstrap Job after the REST PATCH.'
-            }
-
-            try {
-                $verifyJob = $verifyJobJson | ConvertFrom-Json -ErrorAction Stop
-                $verifyContainer = $verifyJob.properties.template.containers[0]
-                $configuredCommand = @($verifyContainer.command)
-                $configuredArgs = @($verifyContainer.args)
-            }
-            catch {
-                throw "Could not parse the PostgreSQL bootstrap Job definition after the REST PATCH: $($_.Exception.Message)"
-            }
-
-            Write-Host "Configured command: $($configuredCommand -join ', ')" -ForegroundColor Gray
-            Write-Host "Configured args   : count=$($configuredArgs.Count), first='$($configuredArgs[0])'" -ForegroundColor Gray
-
-            if ($configuredCommand.Count -ne 1 -or $configuredCommand[0] -ne '/bin/sh') {
-                throw "Azure did not persist the /bin/sh command override on the PostgreSQL bootstrap Job. Actual command: '$($configuredCommand -join ', ')'"
-            }
-
-            if ($configuredArgs.Count -lt 2 -or $configuredArgs[0] -ne '-c') {
-                throw "Azure did not persist the expected Container Apps args array. Actual args count=$($configuredArgs.Count), first='$($configuredArgs[0])'"
-            }
-
-            # Azure has now persisted the complete second argument. Do not
-            # inspect its multiline contents with PowerShell pattern matching;
-            # the container will execute it when the Job starts.
-            if ([string]::IsNullOrWhiteSpace([string]$configuredArgs[1])) {
-                throw 'Azure persisted an empty PostgreSQL bootstrap shell script argument.'
-            }
-
-            Write-Host 'PostgreSQL bootstrap command verified successfully.' -ForegroundColor Green
-
-            $execution = az containerapp job start `
-                --name $bootstrapJob `
-                --resource-group $ResourceGroupName `
-                --query name `
-                --output tsv `
-                --only-show-errors
-
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($execution)) {
-                throw 'Failed to start the PostgreSQL bootstrap Job.'
-            }
-
-            Write-Host "Started PostgreSQL bootstrap execution: $execution" -ForegroundColor Gray
+            $execution = az containerapp job start --name $bootstrapJob --resource-group $ResourceGroupName --query name --output tsv --only-show-errors
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($execution)) { throw 'Failed to start the PostgreSQL bootstrap Job.' }
 
             $completed = $false
             for ($poll = 1; $poll -le 24; $poll++) {
-                $status = az containerapp job execution show `
-                    --name $bootstrapJob `
-                    --resource-group $ResourceGroupName `
-                    --job-execution-name $execution `
-                    --query properties.status `
-                    --output tsv `
-                    --only-show-errors
-
+                $status = az containerapp job execution show --name $bootstrapJob --resource-group $ResourceGroupName --job-execution-name $execution --query properties.status --output tsv --only-show-errors
                 Write-Host "PostgreSQL bootstrap execution status: $status" -ForegroundColor Gray
-
-                if ($status -eq 'Succeeded') {
-                    $completed = $true
-                    break
-                }
-
-                if ($status -eq 'Failed' -or $status -eq 'Canceled') {
-                    break
-                }
-
+                if ($status -eq 'Succeeded') { $completed = $true; break }
+                if ($status -eq 'Failed' -or $status -eq 'Canceled') { break }
                 Start-Sleep -Seconds 5
             }
+            if ($completed) { Write-Host 'PostgreSQL managed identity bootstrap completed successfully.' -ForegroundColor Green; return }
 
-            if ($completed) {
-                Write-Host 'PostgreSQL managed identity roles configured successfully.' -ForegroundColor Green
-                return
-            }
-
-            Write-Host 'Bootstrap execution failed. Collecting PostgreSQL bootstrap logs from Log Analytics...' -ForegroundColor Yellow
-
-            $workspaceId = az containerapp env show `
-                --name $EnvironmentName `
-                --resource-group $ResourceGroupName `
-                --query properties.appLogsConfiguration.logAnalyticsConfiguration.customerId `
-                --output tsv `
-                --only-show-errors 2>$null
-
+            Write-Host 'Bootstrap execution failed; collecting Log Analytics output before retry...' -ForegroundColor Yellow
+            $workspaceId = az containerapp env show --name $EnvironmentName --resource-group $ResourceGroupName --query properties.appLogsConfiguration.logAnalyticsConfiguration.customerId --output tsv --only-show-errors 2>$null
             if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($workspaceId)) {
                 Start-Sleep -Seconds 10
-
                 $logQuery = "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$bootstrapJob' | where ContainerGroupName_s startswith '$execution' | project TimeGenerated, Log_s | order by TimeGenerated asc"
-
-                try {
-                    $logs = az monitor log-analytics query `
-                        --workspace $workspaceId `
-                        --analytics-query $logQuery `
-                        --query '[].Log_s' `
-                        --output tsv `
-                        --only-show-errors 2>$null
-
-                    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($logs)) {
-                        Write-Host 'PostgreSQL bootstrap Job output:' -ForegroundColor Yellow
-                        Write-Host $logs
-                    }
-                    else {
-                        Write-Host 'Bootstrap logs are not available yet. The failed execution will be retried.' -ForegroundColor Yellow
-                    }
-                }
-                catch {
-                    Write-Host "Could not retrieve bootstrap logs from Log Analytics: $($_.Exception.Message)" -ForegroundColor Yellow
-                }
+                $logs = az monitor log-analytics query --workspace $workspaceId --analytics-query $logQuery --query '[].Log_s' --output tsv --only-show-errors 2>$null
+                if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($logs)) { Write-Host $logs }
             }
-            else {
-                Write-Host 'Could not retrieve the Log Analytics workspace ID. Continuing with bootstrap retry.' -ForegroundColor Yellow
-            }
-
             if ($attempt -lt 6) {
-                Write-Host 'Bootstrap did not complete successfully; waiting before retrying with a fresh Entra token...' -ForegroundColor Yellow
                 az containerapp job delete --name $bootstrapJob --resource-group $ResourceGroupName --yes --only-show-errors --output none
                 Start-Sleep -Seconds 15
             }
-            else {
-                throw 'PostgreSQL managed identity bootstrap failed after 6 attempts.'
-            }
+            else { throw 'PostgreSQL managed identity bootstrap failed after 6 attempts.' }
         }
     }
     finally {
         $adminToken = $null
-
-        Write-Host "Cleaning up temporary PostgreSQL bootstrap Job '$bootstrapJob'..." -ForegroundColor Yellow
-
         try {
-            $jobCheck = az containerapp job list `
-                --resource-group $ResourceGroupName `
-                --query "[?name=='$bootstrapJob'].name | [0]" `
-                --output tsv `
-                --only-show-errors `
-                2>$null
-
+            $jobCheck = az containerapp job list --resource-group $ResourceGroupName --query "[?name=='$bootstrapJob'].name | [0]" --output tsv --only-show-errors 2>$null
             if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($jobCheck)) {
-                az containerapp job delete `
-                    --name $bootstrapJob `
-                    --resource-group $ResourceGroupName `
-                    --yes `
-                    --only-show-errors `
-                    --output none `
-                    2>$null
-
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host 'Temporary PostgreSQL bootstrap Job removed.' -ForegroundColor Green
-                }
-            }
-            else {
-                Write-Host 'Temporary PostgreSQL bootstrap Job is already absent.' -ForegroundColor Gray
+                az containerapp job delete --name $bootstrapJob --resource-group $ResourceGroupName --yes --only-show-errors --output none 2>$null
             }
         }
         catch {
@@ -1179,13 +1167,11 @@ echo "PostgreSQL managed identity bootstrap completed successfully."
 
 function Show-DeploymentSummary {
     Write-Step 'Deployment Summary'
-    Write-Host 'Foundation resources : VNet, ACA subnet, Private DNS, Log Analytics, ACR, Key Vault, PostgreSQL and Azure Files' -ForegroundColor Green
-    Write-Host 'Private connectivity : ACR, PostgreSQL and Azure Files private endpoints/DNS are configured' -ForegroundColor Green
-    Write-Host 'GitHub OIDC           : Federated identity + Reader + Container Apps Contributor + Container Apps Jobs Contributor' -ForegroundColor Green
-    Write-Host 'Database access       : PureOTA and HelixBridge UAMIs mapped as non-admin PostgreSQL Entra roles' -ForegroundColor Green
-    Write-Host 'Application DB check  : PureOTA and HelixBridge images validate PostgreSQL using managed identity before nginx starts' -ForegroundColor Green
-    Write-Host 'Job DB check          : PureOTA ACA Job performs the same managed-identity PostgreSQL check before job validation' -ForegroundColor Green
-    Write-Host 'CI/CD                  : Full-SHA ACR image -> ACA revision -> health gate -> approval -> Job -> promotion' -ForegroundColor Green
+    Write-Host 'Foundation resources : Shared VNet, ACA subnet, Private DNS, Log Analytics, ACR, Key Vault, PostgreSQL, shared Storage, Recovery Services backup policy and ACA environment' -ForegroundColor Green
+    Write-Host 'Application resources: Configured applications from apps/apps.json' -ForegroundColor Green
+    Write-Host 'Security              : Per-application managed identities, scoped Key Vault RBAC and Entra group-based Easy Auth' -ForegroundColor Green
+    Write-Host 'Database access       : Configured PostgreSQL managed identities mapped to application schemas' -ForegroundColor Green
+    Write-Host 'CI/CD                  : Full-SHA ACR image -> ACA revision -> health gate -> approval -> validation -> promotion' -ForegroundColor Green
 }
 
 function Get-DefaultDomain {
@@ -1197,94 +1183,118 @@ function Get-DefaultDomain {
 # --------------------------- START ---------------------------
 
 Assert-AzCli
+if (-not (Test-Path $FoundationBicep)) { throw "main.bicep not found: $FoundationBicep" }
+if (-not (Test-Path $RuntimeBicep)) { throw "runtime.bicep not found: $RuntimeBicep" }
 Assert-BicepCompilation
 $account = Assert-AzureLogin
 $TenantId = $account.tenantId
-if (-not (Test-Path $FoundationBicep)) { throw "main.bicep not found: $FoundationBicep" }
 
-if ($GithubRepository -notmatch '^[^/]+/[^/]+$') {
-    throw "GithubRepository must be in OWNER/REPOSITORY format. Received '$GithubRepository'."
-}
-
+if ($GithubRepository -notmatch '^[^/]+/[^/]+$') { throw "GithubRepository must be in OWNER/REPOSITORY format. Received '$GithubRepository'." }
 $githubRepositorySubjectPrefix = Get-GitHubRepositorySubjectPrefix
 Ensure-ResourceGroupForRecovery
+if ($NotificationEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { throw 'NotificationEmail must be a valid email address.' }
 
-if ($NotificationEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-    throw 'NotificationEmail must be a valid email address.'
-}
-
-if (-not $PostgreSqlPassword) {
-    $PostgreSqlPassword = Read-Host -Prompt 'PostgreSQL administrator password' -AsSecureString
-}
+if (-not $PostgreSqlPassword) { $PostgreSqlPassword = Read-Host -Prompt 'PostgreSQL administrator password' -AsSecureString }
 $plainPassword = [System.Net.NetworkCredential]::new('', $PostgreSqlPassword).Password
 $now = Get-Date
 $budgetStartDate = '{0:yyyy}-{0:MM}-01T00:00:00Z' -f $now
-if ([string]::IsNullOrWhiteSpace($plainPassword) -or $plainPassword.Length -lt 8) {
-    throw 'PostgreSQL administrator password must be at least 8 characters.'
-}
+if ([string]::IsNullOrWhiteSpace($plainPassword) -or $plainPassword.Length -lt 8) { throw 'PostgreSQL administrator password must be at least 8 characters.' }
 
 $operatorId = Get-OperatorObjectId
 Write-Host "Subscription: $($account.id)" -ForegroundColor Gray
 Write-Host "Tenant      : $($account.tenantId)" -ForegroundColor Gray
 Write-Host "Repository  : $GithubRepository" -ForegroundColor Gray
 Write-Host "Resource RG : $ResourceGroupName" -ForegroundColor Gray
+if ($FoundationOnly) { Write-Host 'Applications: NOT DEPLOYED (foundation-only mode)' -ForegroundColor Gray } else { Write-Host "Applications: $($Apps.Keys -join ', ')" -ForegroundColor Gray }
 
 try {
+    # 1. Shared foundation + application identities + storage resources.
     Invoke-FoundationDeployment -Password $plainPassword
 
-    Ensure-KeyVaultOperatorAccess -OperatorId $operatorId
-    $storageKey = Get-StorageKey
-    Ensure-KeyVaultSecret -Name $StorageKeySecretName -Value $storageKey
-    $storageKey = $null
+    if ($FoundationOnly) {
+        Write-Step 'FOUNDATION DEPLOYMENT COMPLETE'
+        Write-Host 'Shared platform infrastructure is ready. Application onboarding was intentionally skipped.' -ForegroundColor Green
+        return
+    }
 
-    $pureotaGroupId = Ensure-EntraGroup -DisplayName $PureotaGroupName -MailNickname 'NANDAPureOTAUsers' -OperatorId $operatorId
-    $helixGroupId = Ensure-EntraGroup -DisplayName $HelixGroupName -MailNickname 'NANDAHelixBridgeUsers' -OperatorId $operatorId
+    # 2. Temporary operator access is used only to populate application secrets.
+    Ensure-KeyVaultOperatorAccess -OperatorId $operatorId
+
+    foreach ($entry in $storageApps) {
+        $app = $entry.Value
+        if ($app.keyVault.readStorageKeySecret) {
+            $key = Get-StorageKey -StorageAccountName ([string]$app.storage.accountName)
+            try { Ensure-KeyVaultSecret -Name ([string]$app.keyVault.storageKeySecretName) -Value $key }
+            finally { $key = $null }
+        }
+    }
+
     $postgresAdminGroupId = Ensure-EntraGroup -DisplayName $PostgresAdminGroupName -MailNickname 'NANDAPureOTAPostgreSQLAdmins' -OperatorId $operatorId
     Ensure-PostgreSqlEntraAdministrator -AdminGroupId $postgresAdminGroupId
 
     $domain = Get-DefaultDomain
-    $pureotaRedirect = "https://$PureotaAppName.$domain/.auth/login/aad/callback"
-    $helixRedirect = "https://$HelixAppName.$domain/.auth/login/aad/callback"
+    $entraMetadata = @{}
+    $principalIds = @{}
 
-    $pureotaClientId = Ensure-EntraApplication -DisplayName $PureotaAppRegistrationName -RedirectUri $pureotaRedirect -SecretName $PureotaAuthSecretName -GroupId $pureotaGroupId -OperatorId $operatorId
-    $helixClientId = Ensure-EntraApplication -DisplayName $HelixAppRegistrationName -RedirectUri $helixRedirect -SecretName $HelixAuthSecretName -GroupId $helixGroupId -OperatorId $operatorId
-
-    # PostgreSQL managed-identity bootstrap must happen BEFORE runtime apps/jobs are deployed.
-    # The runtime containers perform a DB connectivity check during startup.
-    $pureotaPrincipalId = az identity show --resource-group $ResourceGroupName --name $PureotaIdentityName --query principalId -o tsv --only-show-errors
-    $helixPrincipalId = az identity show --resource-group $ResourceGroupName --name $HelixIdentityName --query principalId -o tsv --only-show-errors
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($pureotaPrincipalId) -or [string]::IsNullOrWhiteSpace($helixPrincipalId)) {
-        throw 'Could not retrieve runtime managed identity principal IDs for PostgreSQL bootstrap.'
+    foreach ($entry in $enabledApplications) {
+        $app = $entry.Value
+        $principalIds[$entry.Key] = Ensure-AppManagedIdentity -IdentityName ([string]$app.identity.name)
     }
 
-    Ensure-PostgreSqlManagedIdentityAccess `
-        -PureotaIdentityPrincipalId $pureotaPrincipalId `
-        -HelixIdentityPrincipalId $helixPrincipalId
+    foreach ($entry in $Apps.GetEnumerator()) {
+        $key = $entry.Key
+        $app = $entry.Value
+        if (-not $app.enabled) { continue }
 
-    Invoke-RuntimeDeployment `
-        -PureotaGroupId $pureotaGroupId `
-        -PureotaClientId $pureotaClientId `
-        -HelixGroupId $helixGroupId `
-        -HelixClientId $helixClientId `
-        -PostgresAdminGroupId $postgresAdminGroupId
+        $mailNickname = if ($app.entra.PSObject.Properties.Name -contains 'mailNickname' -and -not [string]::IsNullOrWhiteSpace([string]$app.entra.mailNickname)) { [string]$app.entra.mailNickname } else { ('NANDA' + $key + 'Users') }
+        $groupId = Ensure-EntraGroup -DisplayName ([string]$app.entra.groupName) -MailNickname $mailNickname -OperatorId $operatorId
+        $redirectPath = [string]$app.entra.redirectPath
+        if ([string]::IsNullOrWhiteSpace($redirectPath)) { $redirectPath = '/.auth/login/aad/callback' }
+        $redirectUri = "https://$($app.containerAppName).$domain$redirectPath"
+
+        $clientId = ''
+        if ($app.keyVault.readAuthSecret) {
+            $clientId = Ensure-EntraApplication `
+                -DisplayName ([string]$app.entra.applicationName) `
+                -RedirectUri $redirectUri `
+                -SecretName ([string]$app.keyVault.authSecretName) `
+                -GroupId $groupId `
+                -OperatorId $operatorId
+        }
+        else {
+            $clientId = az ad app list --display-name ([string]$app.entra.applicationName) --query '[0].appId' -o tsv --only-show-errors
+            if ([string]::IsNullOrWhiteSpace($clientId)) { throw "Application '$key' has readAuthSecret=false but Entra application '$($app.entra.applicationName)' does not exist." }
+        }
+
+        $entraMetadata[$key] = @{ groupId = $groupId; clientId = $clientId }
+        if (-not $principalIds.ContainsKey($key) -or [string]::IsNullOrWhiteSpace([string]$principalIds[$key])) {
+            throw "Managed identity principal ID is missing for application '$key'."
+        }
+    }
+
+    # Key Vault secret-scoped RBAC is applied only after the secrets have been created.
+    foreach ($entry in $enabledApplications) {
+        $app = $entry.Value
+        if ($app.keyVault.readAuthSecret) {
+            Ensure-KeyVaultSecretAccess -PrincipalId ([string]$principalIds[$entry.Key]) -SecretName ([string]$app.keyVault.authSecretName)
+        }
+    }
+
+    # 3. Database roles/schemas are established before runtime apps start.
+    if ($principalIds.Count -gt 0 -and $postgresApps.Count -gt 0) {
+        $postgresPrincipalIds = @{}
+        foreach ($entry in $postgresApps) { $postgresPrincipalIds[$entry.Key] = $principalIds[$entry.Key] }
+        Ensure-PostgreSqlManagedIdentityAccess -PrincipalIds $postgresPrincipalIds
+    }
+
+    # 4. Runtime references the same apps.json configuration.
+    Invoke-RuntimeDeployment -PostgresAdminGroupId $postgresAdminGroupId -EntraMetadata $entraMetadata
 
     Show-DeploymentSummary
-
     Write-Step 'DEPLOYMENT COMPLETE'
-    Write-Host "Resource Group        : $ResourceGroupName" -ForegroundColor Green
-    Write-Host 'ACA Environment       : Internal / VNet integrated' -ForegroundColor Green
-    Write-Host 'ACR                   : Premium / admin disabled / retention enabled' -ForegroundColor Green
-    Write-Host 'Key Vault             : RBAC / soft delete / purge protection' -ForegroundColor Green
-    Write-Host 'PostgreSQL            : Private / Entra enabled / 7-day PITR retention' -ForegroundColor Green
-    Write-Host 'Azure Files           : Private / persistent' -ForegroundColor Green
-    Write-Host 'PureOTA               : Dummy ACA app + Easy Auth + persistent mount' -ForegroundColor Green
-    Write-Host 'HelixBridge           : Dummy ACA app + Easy Auth' -ForegroundColor Green
-    Write-Host 'PureOTA ACA Job       : Manual job with persistent mount' -ForegroundColor Green
-    Write-Host 'Azure Monitor         : Required platform alerts configured' -ForegroundColor Green
-    Write-Host 'GitHub OIDC           : Federated main + production credentials' -ForegroundColor Green
-
-    Write-Host 'Infrastructure is ready.' -ForegroundColor Green
-    Write-Host ''
+    Write-Host "Resource Group : $ResourceGroupName" -ForegroundColor Green
+    Write-Host "Applications   : $($Apps.Keys -join ', ')" -ForegroundColor Green
+    Write-Host 'Infrastructure is ready for GitHub application CI/CD deployment.' -ForegroundColor Green
 }
 finally {
     if ($storageKey) { $storageKey = $null }

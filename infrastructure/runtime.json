@@ -1,0 +1,1317 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.47.16.16243",
+      "templateHash": "9191653719993414915"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "westus",
+      "metadata": {
+        "description": "Azure region"
+      }
+    },
+    "enabledApplications": {
+      "type": "array",
+      "metadata": {
+        "description": "Enabled application configurations from apps/apps.json."
+      }
+    },
+    "storageApplications": {
+      "type": "array",
+      "metadata": {
+        "description": "Applications with Azure Files enabled."
+      }
+    },
+    "jobApplications": {
+      "type": "array",
+      "metadata": {
+        "description": "Applications with ACA Jobs enabled."
+      }
+    },
+    "authApplications": {
+      "type": "array",
+      "metadata": {
+        "description": "Applications with Easy Auth enabled."
+      }
+    },
+    "entraMetadata": {
+      "type": "object",
+      "metadata": {
+        "description": "Runtime Entra metadata keyed by application key. Each entry contains groupId and clientId."
+      }
+    },
+    "postgresqlEntraAdministratorObjectId": {
+      "type": "string",
+      "metadata": {
+        "description": "PostgreSQL Entra administrator group object ID"
+      }
+    },
+    "postgresqlEntraAdministratorName": {
+      "type": "string",
+      "metadata": {
+        "description": "PostgreSQL Entra administrator group display name"
+      }
+    },
+    "tenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Entra tenant ID"
+      }
+    },
+    "notificationEmail": {
+      "type": "string",
+      "metadata": {
+        "description": "Monitoring notification email"
+      }
+    },
+    "acrName": {
+      "type": "string"
+    },
+    "keyVaultName": {
+      "type": "string"
+    },
+    "postgresqlServerName": {
+      "type": "string"
+    },
+    "containerAppsEnvironmentName": {
+      "type": "string"
+    },
+    "storageIdentityName": {
+      "type": "string"
+    },
+    "githubIdentityName": {
+      "type": "string"
+    },
+    "logAnalyticsWorkspaceName": {
+      "type": "string"
+    },
+    "monitoringActionGroupName": {
+      "type": "string"
+    }
+  },
+  "resources": [
+    {
+      "copy": {
+        "name": "containerStorage",
+        "count": "[length(parameters('storageApplications'))]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('containerStorage-{0}', parameters('storageApplications')[copyIndex()].key)]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "environmentName": {
+            "value": "[parameters('containerAppsEnvironmentName')]"
+          },
+          "storageName": {
+            "value": "[parameters('storageApplications')[copyIndex()].value.storage.bindingName]"
+          },
+          "storageAccountName": {
+            "value": "[parameters('storageApplications')[copyIndex()].value.storage.accountName]"
+          },
+          "fileShareName": {
+            "value": "[parameters('storageApplications')[copyIndex()].value.storage.fileShareName]"
+          },
+          "keyVaultName": {
+            "value": "[parameters('keyVaultName')]"
+          },
+          "storageIdentityId": {
+            "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('storageIdentityName'))]"
+          },
+          "secretName": {
+            "value": "[parameters('storageApplications')[copyIndex()].value.keyVault.storageKeySecretName]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.47.16.16243",
+              "templateHash": "4242535507787293833"
+            }
+          },
+          "parameters": {
+            "environmentName": {
+              "type": "string"
+            },
+            "storageName": {
+              "type": "string"
+            },
+            "storageAccountName": {
+              "type": "string"
+            },
+            "fileShareName": {
+              "type": "string"
+            },
+            "keyVaultName": {
+              "type": "string"
+            },
+            "storageIdentityId": {
+              "type": "string"
+            },
+            "secretName": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/managedEnvironments/storages",
+              "apiVersion": "2025-10-02-preview",
+              "name": "[format('{0}/{1}', parameters('environmentName'), parameters('storageName'))]",
+              "properties": {
+                "azureFile": {
+                  "accessMode": "ReadWrite",
+                  "accountName": "[parameters('storageAccountName')]",
+                  "shareName": "[parameters('fileShareName')]",
+                  "accountKeyVaultProperties": {
+                    "identity": "[parameters('storageIdentityId')]",
+                    "keyVaultUrl": "[format('https://{0}{1}/secrets/{2}', parameters('keyVaultName'), environment().suffixes.keyvaultDns, parameters('secretName'))]"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "name": {
+              "type": "string",
+              "value": "[parameters('storageName')]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "copy": {
+        "name": "containerApps",
+        "count": "[length(parameters('enabledApplications'))]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('containerApp-{0}', parameters('enabledApplications')[copyIndex()].key)]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[parameters('enabledApplications')[copyIndex()].value.containerAppName]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "environmentId": {
+            "value": "[resourceId('Microsoft.App/managedEnvironments', parameters('containerAppsEnvironmentName'))]"
+          },
+          "image": {
+            "value": "nginx:alpine"
+          },
+          "containerPort": {
+            "value": "[int(parameters('enabledApplications')[copyIndex()].value.targetPort)]"
+          },
+          "minReplicas": {
+            "value": "[int(parameters('enabledApplications')[copyIndex()].value.minReplicas)]"
+          },
+          "maxReplicas": {
+            "value": "[int(parameters('enabledApplications')[copyIndex()].value.maxReplicas)]"
+          },
+          "identityId": {
+            "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('enabledApplications')[copyIndex()].value.identity.name)]"
+          },
+          "githubActionsPrincipalId": {
+            "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('githubIdentityName')), '2023-01-31').principalId]"
+          },
+          "acrLoginServer": {
+            "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-07-01').loginServer]"
+          },
+          "keyVaultName": {
+            "value": "[parameters('keyVaultName')]"
+          },
+          "keyVaultSecretName": {
+            "value": "[parameters('enabledApplications')[copyIndex()].value.keyVault.authSecretName]"
+          },
+          "enableKeyVaultSecret": {
+            "value": "[bool(parameters('enabledApplications')[copyIndex()].value.keyVault.readAuthSecret)]"
+          },
+          "enableAzureFile": {
+            "value": "[bool(parameters('enabledApplications')[copyIndex()].value.storage.enabled)]"
+          },
+          "azureFileStorageName": {
+            "value": "[parameters('enabledApplications')[copyIndex()].value.storage.bindingName]"
+          },
+          "azureFileMountPath": {
+            "value": "[parameters('enabledApplications')[copyIndex()].value.storage.mountPath]"
+          },
+          "healthPath": {
+            "value": "[parameters('enabledApplications')[copyIndex()].value.healthPath]"
+          },
+          "ingressExternal": {
+            "value": "[bool(parameters('enabledApplications')[copyIndex()].value.ingress.external)]"
+          },
+          "ingressTransport": "[if(equals(toUpper(parameters('enabledApplications')[copyIndex()].value.ingress.transport), 'AUTO'), createObject('value', 'Auto'), createObject('value', parameters('enabledApplications')[copyIndex()].value.ingress.transport))]",
+          "postgresHost": "[if(parameters('enabledApplications')[copyIndex()].value.postgres.enabled, createObject('value', reference(resourceId('Microsoft.DBforPostgreSQL/flexibleServers', parameters('postgresqlServerName')), '2025-08-01').fullyQualifiedDomainName), createObject('value', ''))]",
+          "postgresDatabase": "[if(parameters('enabledApplications')[copyIndex()].value.postgres.enabled, createObject('value', parameters('enabledApplications')[copyIndex()].value.postgres.databaseName), createObject('value', ''))]",
+          "postgresUser": "[if(parameters('enabledApplications')[copyIndex()].value.postgres.enabled, createObject('value', parameters('enabledApplications')[copyIndex()].value.identity.name), createObject('value', ''))]",
+          "postgresClientId": "[if(parameters('enabledApplications')[copyIndex()].value.postgres.enabled, createObject('value', reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('enabledApplications')[copyIndex()].value.identity.name), '2023-01-31').clientId), createObject('value', ''))]"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.47.16.16243",
+              "templateHash": "9555528696478271101"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "environmentId": {
+              "type": "string"
+            },
+            "image": {
+              "type": "string"
+            },
+            "containerPort": {
+              "type": "int",
+              "defaultValue": 8080
+            },
+            "minReplicas": {
+              "type": "int",
+              "defaultValue": 1
+            },
+            "maxReplicas": {
+              "type": "int",
+              "defaultValue": 1
+            },
+            "identityId": {
+              "type": "string"
+            },
+            "githubActionsPrincipalId": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "acrLoginServer": {
+              "type": "string"
+            },
+            "keyVaultName": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "keyVaultSecretName": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "enableKeyVaultSecret": {
+              "type": "bool",
+              "defaultValue": false
+            },
+            "enableAzureFile": {
+              "type": "bool",
+              "defaultValue": false
+            },
+            "azureFileStorageName": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "azureFileMountPath": {
+              "type": "string",
+              "defaultValue": "/mnt/data"
+            },
+            "healthPath": {
+              "type": "string",
+              "defaultValue": "/healthz"
+            },
+            "ingressExternal": {
+              "type": "bool",
+              "defaultValue": true
+            },
+            "ingressTransport": {
+              "type": "string",
+              "defaultValue": "Auto"
+            },
+            "postgresHost": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "postgresDatabase": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "postgresUser": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "postgresClientId": {
+              "type": "string",
+              "defaultValue": ""
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2025-07-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                  "[format('{0}', parameters('identityId'))]": {}
+                }
+              },
+              "properties": {
+                "managedEnvironmentId": "[parameters('environmentId')]",
+                "configuration": {
+                  "activeRevisionsMode": "Multiple",
+                  "registries": [
+                    {
+                      "server": "[parameters('acrLoginServer')]",
+                      "identity": "[parameters('identityId')]"
+                    }
+                  ],
+                  "secrets": "[if(parameters('enableKeyVaultSecret'), createArray(createObject('name', parameters('keyVaultSecretName'), 'identity', parameters('identityId'), 'keyVaultUrl', format('https://{0}{1}/secrets/{2}', parameters('keyVaultName'), environment().suffixes.keyvaultDns, parameters('keyVaultSecretName')))), createArray())]",
+                  "ingress": {
+                    "external": "[parameters('ingressExternal')]",
+                    "targetPort": "[parameters('containerPort')]",
+                    "transport": "[parameters('ingressTransport')]",
+                    "allowInsecure": false
+                  }
+                },
+                "template": {
+                  "containers": [
+                    {
+                      "name": "[parameters('name')]",
+                      "image": "[parameters('image')]",
+                      "env": "[if(not(empty(parameters('postgresHost'))), createArray(createObject('name', 'PGHOST', 'value', parameters('postgresHost')), createObject('name', 'PGPORT', 'value', '5432'), createObject('name', 'PGDATABASE', 'value', parameters('postgresDatabase')), createObject('name', 'PGUSER', 'value', parameters('postgresUser')), createObject('name', 'PGSSLMODE', 'value', 'require'), createObject('name', 'IDENTITY_CLIENT_ID', 'value', parameters('postgresClientId'))), createArray())]",
+                      "resources": {
+                        "cpu": "[json('0.25')]",
+                        "memory": "0.5Gi"
+                      },
+                      "volumeMounts": "[if(parameters('enableAzureFile'), createArray(createObject('volumeName', 'persistent-data', 'mountPath', parameters('azureFileMountPath'))), createArray())]",
+                      "probes": [
+                        {
+                          "type": "Liveness",
+                          "httpGet": {
+                            "path": "[parameters('healthPath')]",
+                            "port": "[parameters('containerPort')]"
+                          },
+                          "initialDelaySeconds": 10,
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "failureThreshold": 3
+                        },
+                        {
+                          "type": "Readiness",
+                          "httpGet": {
+                            "path": "[parameters('healthPath')]",
+                            "port": "[parameters('containerPort')]"
+                          },
+                          "initialDelaySeconds": 10,
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "failureThreshold": 3
+                        }
+                      ]
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": "[parameters('minReplicas')]",
+                    "maxReplicas": "[parameters('maxReplicas')]"
+                  },
+                  "volumes": "[if(parameters('enableAzureFile'), createArray(createObject('name', 'persistent-data', 'storageType', 'AzureFile', 'storageName', parameters('azureFileStorageName'))), createArray())]"
+                }
+              }
+            },
+            {
+              "condition": "[not(empty(parameters('githubActionsPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.App/containerApps', parameters('name'))]",
+              "name": "[guid(resourceId('Microsoft.App/containerApps', parameters('name')), parameters('githubActionsPrincipalId'), '358470bc-b998-42bd-ab17-a7e34c199c0f')]",
+              "properties": {
+                "principalId": "[parameters('githubActionsPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '358470bc-b998-42bd-ab17-a7e34c199c0f')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.App/containerApps', parameters('name'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.App/containerApps', parameters('name'))]"
+            },
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "containerStorage"
+      ]
+    },
+    {
+      "copy": {
+        "name": "authConfigs",
+        "count": "[length(parameters('authApplications'))]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('auth-{0}', parameters('authApplications')[copyIndex()].key)]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "containerAppName": {
+            "value": "[parameters('authApplications')[copyIndex()].value.containerAppName]"
+          },
+          "clientId": {
+            "value": "[parameters('entraMetadata')[parameters('authApplications')[copyIndex()].key].clientId]"
+          },
+          "tenantId": {
+            "value": "[parameters('tenantId')]"
+          },
+          "allowedGroupId": {
+            "value": "[parameters('entraMetadata')[parameters('authApplications')[copyIndex()].key].groupId]"
+          },
+          "settingName": {
+            "value": "[parameters('authApplications')[copyIndex()].value.keyVault.authSecretName]"
+          },
+          "enabled": {
+            "value": true
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.47.16.16243",
+              "templateHash": "7831894605776906241"
+            }
+          },
+          "parameters": {
+            "containerAppName": {
+              "type": "string"
+            },
+            "clientId": {
+              "type": "string"
+            },
+            "tenantId": {
+              "type": "string"
+            },
+            "allowedGroupId": {
+              "type": "string"
+            },
+            "settingName": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "bool",
+              "defaultValue": true
+            }
+          },
+          "resources": [
+            {
+              "condition": "[parameters('enabled')]",
+              "type": "Microsoft.App/containerApps/authConfigs",
+              "apiVersion": "2025-07-01",
+              "name": "[format('{0}/{1}', parameters('containerAppName'), 'current')]",
+              "properties": {
+                "globalValidation": {
+                  "redirectToProvider": "azureactivedirectory",
+                  "unauthenticatedClientAction": "RedirectToLoginPage"
+                },
+                "httpSettings": {
+                  "requireHttps": true
+                },
+                "identityProviders": {
+                  "azureActiveDirectory": {
+                    "enabled": true,
+                    "registration": {
+                      "clientId": "[parameters('clientId')]",
+                      "clientSecretSettingName": "[parameters('settingName')]",
+                      "openIdIssuer": "[format('{0}{1}/v2.0', environment().authentication.loginEndpoint, parameters('tenantId'))]"
+                    },
+                    "validation": {
+                      "allowedAudiences": [
+                        "[parameters('clientId')]"
+                      ],
+                      "defaultAuthorizationPolicy": {
+                        "allowedPrincipals": {
+                          "groups": [
+                            "[parameters('allowedGroupId')]"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                "platform": {
+                  "enabled": true
+                }
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "containerApps"
+      ]
+    },
+    {
+      "copy": {
+        "name": "containerJobs",
+        "count": "[length(parameters('jobApplications'))]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('job-{0}', parameters('jobApplications')[copyIndex()].key)]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[parameters('jobApplications')[copyIndex()].value.job.jobName]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "environmentId": {
+            "value": "[resourceId('Microsoft.App/managedEnvironments', parameters('containerAppsEnvironmentName'))]"
+          },
+          "image": {
+            "value": "nginx:alpine"
+          },
+          "identityId": {
+            "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('jobApplications')[copyIndex()].value.identity.name)]"
+          },
+          "githubActionsPrincipalId": {
+            "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('githubIdentityName')), '2023-01-31').principalId]"
+          },
+          "acrLoginServer": {
+            "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-07-01').loginServer]"
+          },
+          "storageName": {
+            "value": "[parameters('jobApplications')[copyIndex()].value.storage.bindingName]"
+          },
+          "enableAzureFile": {
+            "value": "[bool(parameters('jobApplications')[copyIndex()].value.storage.enabled)]"
+          },
+          "command": {
+            "value": "[parameters('jobApplications')[copyIndex()].value.job.command]"
+          },
+          "postgresHost": "[if(parameters('jobApplications')[copyIndex()].value.postgres.enabled, createObject('value', reference(resourceId('Microsoft.DBforPostgreSQL/flexibleServers', parameters('postgresqlServerName')), '2025-08-01').fullyQualifiedDomainName), createObject('value', ''))]",
+          "postgresDatabase": "[if(parameters('jobApplications')[copyIndex()].value.postgres.enabled, createObject('value', parameters('jobApplications')[copyIndex()].value.postgres.databaseName), createObject('value', ''))]",
+          "postgresUser": "[if(parameters('jobApplications')[copyIndex()].value.postgres.enabled, createObject('value', parameters('jobApplications')[copyIndex()].value.identity.name), createObject('value', ''))]",
+          "postgresClientId": "[if(parameters('jobApplications')[copyIndex()].value.postgres.enabled, createObject('value', reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('jobApplications')[copyIndex()].value.identity.name), '2023-01-31').clientId), createObject('value', ''))]"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.47.16.16243",
+              "templateHash": "2587848439177198384"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "environmentId": {
+              "type": "string"
+            },
+            "image": {
+              "type": "string"
+            },
+            "identityId": {
+              "type": "string"
+            },
+            "githubActionsPrincipalId": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "acrLoginServer": {
+              "type": "string"
+            },
+            "storageName": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "enableAzureFile": {
+              "type": "bool",
+              "defaultValue": false
+            },
+            "command": {
+              "type": "string"
+            },
+            "postgresHost": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "postgresDatabase": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "postgresUser": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "postgresClientId": {
+              "type": "string",
+              "defaultValue": ""
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/jobs",
+              "apiVersion": "2025-10-02-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                  "[format('{0}', parameters('identityId'))]": {}
+                }
+              },
+              "properties": {
+                "environmentId": "[parameters('environmentId')]",
+                "configuration": {
+                  "triggerType": "Manual",
+                  "registries": [
+                    {
+                      "server": "[parameters('acrLoginServer')]",
+                      "identity": "[parameters('identityId')]"
+                    }
+                  ],
+                  "manualTriggerConfig": {
+                    "parallelism": 1,
+                    "replicaCompletionCount": 1
+                  },
+                  "replicaRetryLimit": 1,
+                  "replicaTimeout": 300
+                },
+                "template": {
+                  "containers": [
+                    {
+                      "name": "[parameters('name')]",
+                      "image": "[parameters('image')]",
+                      "command": [
+                        "/bin/sh",
+                        "-c"
+                      ],
+                      "args": [
+                        "[parameters('command')]"
+                      ],
+                      "env": "[if(not(empty(parameters('postgresHost'))), createArray(createObject('name', 'PGHOST', 'value', parameters('postgresHost')), createObject('name', 'PGPORT', 'value', '5432'), createObject('name', 'PGDATABASE', 'value', parameters('postgresDatabase')), createObject('name', 'PGUSER', 'value', parameters('postgresUser')), createObject('name', 'PGSSLMODE', 'value', 'require'), createObject('name', 'IDENTITY_CLIENT_ID', 'value', parameters('postgresClientId'))), createArray())]",
+                      "resources": {
+                        "cpu": "[json('0.25')]",
+                        "memory": "0.5Gi"
+                      },
+                      "volumeMounts": "[if(parameters('enableAzureFile'), createArray(createObject('volumeName', 'persistent-data', 'mountPath', '/mnt/tier-data')), createArray())]"
+                    }
+                  ],
+                  "volumes": "[if(parameters('enableAzureFile'), createArray(createObject('name', 'persistent-data', 'storageType', 'AzureFile', 'storageName', parameters('storageName'))), createArray())]"
+                }
+              }
+            },
+            {
+              "condition": "[not(empty(parameters('githubActionsPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.App/jobs', parameters('name'))]",
+              "name": "[guid(resourceId('Microsoft.App/jobs', parameters('name')), parameters('githubActionsPrincipalId'), '4e3d2b60-56ae-4dc6-a233-09c8e5a82e68')]",
+              "properties": {
+                "principalId": "[parameters('githubActionsPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4e3d2b60-56ae-4dc6-a233-09c8e5a82e68')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.App/jobs', parameters('name'))]"
+              ]
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "containerStorage"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "postgresAdmin",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "serverName": {
+            "value": "[parameters('postgresqlServerName')]"
+          },
+          "principalObjectId": {
+            "value": "[parameters('postgresqlEntraAdministratorObjectId')]"
+          },
+          "principalName": {
+            "value": "[parameters('postgresqlEntraAdministratorName')]"
+          },
+          "principalType": {
+            "value": "Group"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.47.16.16243",
+              "templateHash": "10082033388340796162"
+            }
+          },
+          "parameters": {
+            "serverName": {
+              "type": "string"
+            },
+            "principalObjectId": {
+              "type": "string"
+            },
+            "principalName": {
+              "type": "string"
+            },
+            "principalType": {
+              "type": "string",
+              "defaultValue": "Group"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.DBforPostgreSQL/flexibleServers/administrators",
+              "apiVersion": "2025-08-01",
+              "name": "[format('{0}/{1}', parameters('serverName'), parameters('principalObjectId'))]",
+              "properties": {
+                "principalName": "[parameters('principalName')]",
+                "principalType": "[parameters('principalType')]",
+                "tenantId": "[subscription().tenantId]"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "monitoring",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "actionGroupName": {
+            "value": "[parameters('monitoringActionGroupName')]"
+          },
+          "notificationEmail": {
+            "value": "[parameters('notificationEmail')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+          },
+          "applicationIds": {
+            "copy": [
+              {
+                "name": "value",
+                "count": "[length(parameters('enabledApplications'))]",
+                "input": "[resourceId('Microsoft.App/containerApps', parameters('enabledApplications')[copyIndex('value')].value.containerAppName)]"
+              }
+            ]
+          },
+          "applicationNames": {
+            "copy": [
+              {
+                "name": "value",
+                "count": "[length(parameters('enabledApplications'))]",
+                "input": "[parameters('enabledApplications')[copyIndex('value')].value.containerAppName]"
+              }
+            ]
+          },
+          "storageFileServiceIds": {
+            "copy": [
+              {
+                "name": "value",
+                "count": "[length(parameters('storageApplications'))]",
+                "input": "[resourceId('Microsoft.Storage/storageAccounts/fileServices', parameters('storageApplications')[copyIndex('value')].value.storage.accountName, 'default')]"
+              }
+            ]
+          },
+          "postgresqlId": {
+            "value": "[resourceId('Microsoft.DBforPostgreSQL/flexibleServers', parameters('postgresqlServerName'))]"
+          },
+          "postgresqlConnectionThreshold": {
+            "value": 80
+          },
+          "storageThreshold": {
+            "value": 80
+          },
+          "fileShareBandwidthThreshold": {
+            "value": 80
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.47.16.16243",
+              "templateHash": "2726338292804292850"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "actionGroupName": {
+              "type": "string",
+              "metadata": {
+                "description": "Platform/application alert action group name."
+              }
+            },
+            "notificationEmail": {
+              "type": "string",
+              "metadata": {
+                "description": "Notification email address."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Log Analytics workspace resource ID."
+              }
+            },
+            "applicationIds": {
+              "type": "array",
+              "metadata": {
+                "description": "Application resource IDs."
+              }
+            },
+            "applicationNames": {
+              "type": "array",
+              "metadata": {
+                "description": "Application names used by Log Analytics queries."
+              }
+            },
+            "storageFileServiceIds": {
+              "type": "array",
+              "metadata": {
+                "description": "Azure Files file service resource IDs."
+              }
+            },
+            "postgresqlId": {
+              "type": "string",
+              "metadata": {
+                "description": "PostgreSQL Flexible Server resource ID."
+              }
+            },
+            "postgresqlConnectionThreshold": {
+              "type": "int",
+              "defaultValue": 80,
+              "metadata": {
+                "description": "PostgreSQL active connection threshold."
+              }
+            },
+            "storageThreshold": {
+              "type": "int",
+              "defaultValue": 80,
+              "metadata": {
+                "description": "Storage utilization threshold."
+              }
+            },
+            "fileShareBandwidthThreshold": {
+              "type": "int",
+              "defaultValue": 80,
+              "metadata": {
+                "description": "Azure Files bandwidth threshold."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Insights/actionGroups",
+              "apiVersion": "2023-01-01",
+              "name": "[parameters('actionGroupName')]",
+              "location": "global",
+              "properties": {
+                "groupShortName": "ACAPlatform",
+                "enabled": true,
+                "emailReceivers": [
+                  {
+                    "name": "Primary",
+                    "emailAddress": "[parameters('notificationEmail')]",
+                    "useCommonAlertSchema": true
+                  }
+                ]
+              }
+            },
+            {
+              "copy": {
+                "name": "appRestart",
+                "count": "[length(parameters('applicationIds'))]"
+              },
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "[format('aca-{0}-restart-loop', uniqueString(parameters('applicationIds')[copyIndex()]))]",
+              "location": "global",
+              "properties": {
+                "description": "Container App replica restart count exceeded the POC threshold.",
+                "severity": 2,
+                "enabled": true,
+                "scopes": [
+                  "[parameters('applicationIds')[copyIndex()]]"
+                ],
+                "evaluationFrequency": "PT1M",
+                "windowSize": "PT5M",
+                "autoMitigate": true,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "criterionType": "StaticThresholdCriterion",
+                      "name": "RestartCount",
+                      "metricName": "RestartCount",
+                      "metricNamespace": "Microsoft.App/containerapps",
+                      "operator": "GreaterThan",
+                      "threshold": 3,
+                      "timeAggregation": "Maximum",
+                      "dimensions": [],
+                      "skipMetricValidation": false
+                    }
+                  ],
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria"
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "postgresql-connection-saturation",
+              "location": "global",
+              "properties": {
+                "description": "PostgreSQL active connections exceeded the configured POC threshold.",
+                "severity": 2,
+                "enabled": true,
+                "scopes": [
+                  "[parameters('postgresqlId')]"
+                ],
+                "evaluationFrequency": "PT1M",
+                "windowSize": "PT5M",
+                "autoMitigate": true,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "criterionType": "StaticThresholdCriterion",
+                      "name": "ActiveConnections",
+                      "metricName": "active_connections",
+                      "metricNamespace": "Microsoft.DBforPostgreSQL/flexibleServers",
+                      "operator": "GreaterThan",
+                      "threshold": "[parameters('postgresqlConnectionThreshold')]",
+                      "timeAggregation": "Maximum",
+                      "dimensions": [],
+                      "skipMetricValidation": false
+                    }
+                  ],
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria"
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "postgresql-storage-threshold",
+              "location": "global",
+              "properties": {
+                "description": "PostgreSQL storage utilization exceeded the configured threshold.",
+                "severity": 2,
+                "enabled": true,
+                "scopes": [
+                  "[parameters('postgresqlId')]"
+                ],
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "autoMitigate": true,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "criterionType": "StaticThresholdCriterion",
+                      "name": "StoragePercent",
+                      "metricName": "storage_percent",
+                      "metricNamespace": "Microsoft.DBforPostgreSQL/flexibleServers",
+                      "operator": "GreaterThan",
+                      "threshold": "[parameters('storageThreshold')]",
+                      "timeAggregation": "Average",
+                      "dimensions": [],
+                      "skipMetricValidation": false
+                    }
+                  ],
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria"
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "fileBandwidth",
+                "count": "[length(parameters('storageFileServiceIds'))]"
+              },
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "[format('azure-files-{0}-bandwidth', uniqueString(parameters('storageFileServiceIds')[copyIndex()]))]",
+              "location": "global",
+              "properties": {
+                "description": "Azure Files bandwidth utilization exceeded the configured threshold.",
+                "severity": 2,
+                "enabled": true,
+                "scopes": [
+                  "[parameters('storageFileServiceIds')[copyIndex()]]"
+                ],
+                "evaluationFrequency": "PT1H",
+                "windowSize": "PT1H",
+                "autoMitigate": true,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "criterionType": "StaticThresholdCriterion",
+                      "name": "PercentFileShareBandwidthUtilization",
+                      "metricName": "PercentFileShareBandwidthUtilization",
+                      "metricNamespace": "Microsoft.Storage/storageAccounts/fileServices",
+                      "operator": "GreaterThan",
+                      "threshold": "[parameters('fileShareBandwidthThreshold')]",
+                      "timeAggregation": "Average",
+                      "dimensions": [],
+                      "skipMetricValidation": false
+                    }
+                  ],
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria"
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "fileCapacity",
+                "count": "[length(parameters('storageFileServiceIds'))]"
+              },
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "[format('azure-files-{0}-capacity', uniqueString(parameters('storageFileServiceIds')[copyIndex()]))]",
+              "location": "global",
+              "properties": {
+                "description": "Azure Files capacity utilization exceeded the configured threshold.",
+                "severity": 2,
+                "enabled": true,
+                "scopes": [
+                  "[parameters('storageFileServiceIds')[copyIndex()]]"
+                ],
+                "evaluationFrequency": "PT15M",
+                "windowSize": "PT1H",
+                "autoMitigate": true,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "criterionType": "StaticThresholdCriterion",
+                      "name": "PercentFileShareUtilization",
+                      "metricName": "PercentFileShareUtilization",
+                      "metricNamespace": "Microsoft.Storage/storageAccounts/fileServices",
+                      "operator": "GreaterThan",
+                      "threshold": "[parameters('storageThreshold')]",
+                      "timeAggregation": "Average",
+                      "dimensions": [],
+                      "skipMetricValidation": false
+                    }
+                  ],
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria"
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "aca-revision-provisioning-failure",
+              "location": "[parameters('location')]",
+              "properties": {
+                "displayName": "ACA revision provisioning failure",
+                "description": "Detects Container Apps revision provisioning errors for configured applications.",
+                "severity": 2,
+                "enabled": true,
+                "scopes": [
+                  "[parameters('logAnalyticsWorkspaceId')]"
+                ],
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT10M",
+                "skipQueryValidation": true,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[format('ContainerAppSystemLogs_CL | where Log_s has \"Error provisioning revision\" | where ContainerAppName_s in (\"{0}\") | summarize Count=count()', join(parameters('applicationNames'), '\",\"'))]",
+                      "timeAggregation": "Count",
+                      "dimensions": [],
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "aca-health-probe-failure",
+              "location": "[parameters('location')]",
+              "properties": {
+                "displayName": "ACA health or readiness probe failure",
+                "description": "Detects Container Apps system log messages indicating health or readiness probe failure.",
+                "severity": 2,
+                "enabled": true,
+                "scopes": [
+                  "[parameters('logAnalyticsWorkspaceId')]"
+                ],
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT10M",
+                "skipQueryValidation": true,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[format('ContainerAppSystemLogs_CL | where ContainerAppName_s in (\"{0}\") | where Log_s has_any (\"health probe\", \"readiness probe\", \"liveness probe\") and Log_s has_any (\"failed\", \"failure\", \"unhealthy\") | summarize Count=count()', join(parameters('applicationNames'), '\",\"'))]",
+                      "timeAggregation": "Count",
+                      "dimensions": [],
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+              ]
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "authConfigs",
+        "containerApps",
+        "containerJobs"
+      ]
+    }
+  ],
+  "outputs": {
+    "applicationNames": {
+      "type": "array",
+      "copy": {
+        "count": "[length(parameters('enabledApplications'))]",
+        "input": "[parameters('enabledApplications')[copyIndex()].value.containerAppName]"
+      }
+    },
+    "postgresqlFqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.DBforPostgreSQL/flexibleServers', parameters('postgresqlServerName')), '2025-08-01').fullyQualifiedDomainName]"
+    }
+  }
+}

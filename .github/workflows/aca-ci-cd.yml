@@ -10,11 +10,7 @@ on:
         description: Application to deploy
         required: true
         default: all
-        type: choice
-        options:
-          - all
-          - pureota
-          - helixbridge
+        type: string
 
 permissions:
   id-token: write
@@ -98,9 +94,9 @@ jobs:
           if requested and requested != "all":
 
               if requested not in cfg:
-                  raise SystemExit(
-                      f"Unknown application: {requested}"
-                  )
+                  raise SystemExit(f"Unknown application: {requested}")
+              if not cfg[requested].get("enabled", True):
+                  raise SystemExit(f"Application is disabled in apps/apps.json: {requested}")
 
               selected = [requested]
 
@@ -109,7 +105,7 @@ jobs:
           # ----------------------------------------------------
           elif event == "workflow_dispatch":
 
-              selected = list(cfg)
+              selected = [name for name, app in cfg.items() if app.get("enabled", True)]
 
           # ----------------------------------------------------
           # Normal push to main
@@ -134,7 +130,7 @@ jobs:
                   "applications for deployment."
               )
 
-              selected = list(cfg)
+              selected = [name for name, app in cfg.items() if app.get("enabled", True)]
 
           # Remove duplicates while preserving order.
           selected = list(dict.fromkeys(selected))
@@ -321,14 +317,6 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --image "$image" \
             --revision-suffix "${GITHUB_SHA:0:12}"
-
-          az containerapp ingress update \
-            --name "${{ matrix.containerAppName }}" \
-            --resource-group "$RESOURCE_GROUP" \
-            --type internal \
-            --target-port "${{ matrix.targetPort }}" \
-            --transport auto
-
 
       # --------------------------------------------------------
       # Find new revision
@@ -554,7 +542,7 @@ jobs:
 
       - name: Skip when no Job is configured
 
-        if: ${{ !matrix.jobEnabled }}
+        if: ${{ !matrix.job.enabled }}
 
         run: |
           echo "No ACA Job configured."
@@ -562,7 +550,7 @@ jobs:
 
       - name: Azure login with OIDC
 
-        if: ${{ matrix.jobEnabled }}
+        if: ${{ matrix.job.enabled }}
 
         uses: azure/login@v2
 
@@ -574,7 +562,7 @@ jobs:
 
       - name: Update Job to immutable SHA and start it
 
-        if: ${{ matrix.jobEnabled }}
+        if: ${{ matrix.job.enabled }}
 
         id: start
 
@@ -590,12 +578,12 @@ jobs:
           image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
 
           az containerapp job update \
-            --name "${{ matrix.jobName }}" \
+            --name "${{ matrix.job.jobName }}" \
             --resource-group "$RESOURCE_GROUP" \
             --image "$image"
 
           execution=$(az containerapp job start \
-            --name "${{ matrix.jobName }}" \
+            --name "${{ matrix.job.jobName }}" \
             --resource-group "$RESOURCE_GROUP" \
             --query name \
             --output tsv)
@@ -605,7 +593,7 @@ jobs:
 
       - name: Wait for Job completion
 
-        if: ${{ matrix.jobEnabled }}
+        if: ${{ matrix.job.enabled }}
 
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
@@ -616,7 +604,7 @@ jobs:
           for i in {1..36}; do
 
             status=$(az containerapp job execution show \
-              --name "${{ matrix.jobName }}" \
+              --name "${{ matrix.job.jobName }}" \
               --resource-group "$RESOURCE_GROUP" \
               --job-execution-name "${{ steps.start.outputs.execution }}" \
               --query properties.status \

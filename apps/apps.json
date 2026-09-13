@@ -2,29 +2,106 @@
   "applications": {
     "pureota": {
       "displayName": "PureOTA",
-      "containerAppName": "nanda-ca-pureota",
-      "imageName": "pureota",
-      "buildContext": "apps/pureota",
-      "dockerfile": "apps/pureota/Dockerfile",
-      "targetPort": 80,
-      "healthPath": "/healthz",
-      "minReplicas": 1,
-      "maxReplicas": 1,
-      "jobEnabled": true,
-      "jobName": "nanda-job-pureota"
+
+      "azure": {
+        "containerAppName": "nanda-ca-pureota",
+        "managedIdentityName": "NANDA-id-pureota",
+        "entraGroupName": "NANDA-PureOTA-Users",
+        "appRegistrationName": "NANDA-PureOTA-ACA-Test"
+      },
+
+      "source": {
+        "imageName": "pureota",
+        "buildContext": "apps/pureota",
+        "dockerfile": "apps/pureota/Dockerfile"
+      },
+
+      "runtime": {
+        "targetPort": 80,
+        "healthPath": "/healthz",
+        "minReplicas": 1,
+        "maxReplicas": 1,
+        "ingressExternal": false,
+        "ingressTransport": "auto"
+      },
+
+      "keyVault": {
+        "authSecretName": "pureota-entra-client-secret",
+        "storageKeySecretName": "pureota-storage-key"
+      },
+
+      "database": {
+        "enabled": true,
+        "databaseName": "arrowhead",
+        "schemaName": "pureota"
+      },
+
+      "storage": {
+        "enabled": true,
+        "accountName": "nandastarrowheadaca",
+        "fileShareName": "pureota-data",
+        "mountPath": "/usr/share/nginx/html/tier-data"
+      },
+
+      "job": {
+        "enabled": true,
+        "jobName": "nanda-job-pureota",
+        "command": "/usr/local/bin/db-check.sh && echo \"PureOTA dummy ACA Job executed\" > /mnt/tier-data/job-validation.txt && date -u >> /mnt/tier-data/job-validation.txt && cat /mnt/tier-data/job-validation.txt"
+      },
+
+      "enabled": true
     },
+
     "helixbridge": {
       "displayName": "HelixBridge",
-      "containerAppName": "nanda-ca-helixbridge",
-      "imageName": "helixbridge",
-      "buildContext": "apps/helixbridge",
-      "dockerfile": "apps/helixbridge/Dockerfile",
-      "targetPort": 80,
-      "healthPath": "/healthz",
-      "minReplicas": 1,
-      "maxReplicas": 1,
-      "jobEnabled": false,
-      "jobName": ""
+
+      "azure": {
+        "containerAppName": "nanda-ca-helixbridge",
+        "managedIdentityName": "NANDA-id-helixbridge",
+        "entraGroupName": "NANDA-HelixBridge-Users",
+        "appRegistrationName": "NANDA-HelixBridge-ACA-Test"
+      },
+
+      "source": {
+        "imageName": "helixbridge",
+        "buildContext": "apps/helixbridge",
+        "dockerfile": "apps/helixbridge/Dockerfile"
+      },
+
+      "runtime": {
+        "targetPort": 80,
+        "healthPath": "/healthz",
+        "minReplicas": 1,
+        "maxReplicas": 1,
+        "ingressExternal": true,
+        "ingressTransport": "auto"
+      },
+
+      "keyVault": {
+        "authSecretName": "helixbridge-entra-client-secret",
+        "storageKeySecretName": ""
+      },
+
+      "database": {
+        "enabled": true,
+        "databaseName": "arrowhead",
+        "schemaName": "helixbridge"
+      },
+
+      "storage": {
+        "enabled": false,
+        "accountName": "",
+        "fileShareName": "",
+        "mountPath": ""
+      },
+
+      "job": {
+        "enabled": false,
+        "jobName": "",
+        "command": ""
+      },
+
+      "enabled": true
     }
   }
 }

@@ -9,79 +9,30 @@ param githubRepositorySubjectPrefix string
 @secure()
 @description('Temporary PostgreSQL administrator password. Used only to bootstrap the server.')
 param postgresqlAdministratorLoginPassword string
-@description('Monitoring notification email. Required when runtime resources are deployed.')
+@description('Monitoring notification email.')
 param notificationEmail string
 @description('Monthly resource group budget amount in subscription currency.')
 param monthlyBudgetAmount int = 100
 @description('First day of the current budget month in ISO-8601 UTC format.')
 param budgetStartDate string = '2026-09-01T00:00:00Z'
-@description('Enable Key Vault private endpoint. Keep false until Arrowhead network/DNS integration is approved.')
+@description('Enable Key Vault private endpoint.')
 param enableKeyVaultPrivateEndpoint bool = false
-
-@description('Recovery Services vault name for Azure Files backup.')
-param azureFilesBackupVaultName string
-
-@description('Azure Files backup policy name.')
-param azureFilesBackupPolicyName string
-
-@description('Daily Azure Files backup time in UTC.')
-param azureFilesBackupScheduleRunTimeUtc string = '2026-01-01T02:00:00Z'
-
-@description('Azure Files backup retention in days.')
-param azureFilesBackupRetentionDays int = 30
-
-@description('Virtual network name.')
 param vnetName string
-@description('ACA infrastructure subnet name.')
 param acaSubnetName string
-@description('Private endpoint subnet name.')
 param privateEndpointSubnetName string
-@description('Log Analytics workspace name.')
 param logAnalyticsWorkspaceName string
-@description('Azure Container Registry name.')
 param acrName string
-@description('Key Vault name.')
 param keyVaultName string
-@description('PostgreSQL Flexible Server name.')
 param postgresqlServerName string
-@description('Azure Container Apps environment name.')
+@description('Shared platform Storage Account name. Application file shares are created during application onboarding.')
+param storageAccountName string = 'nandastarrowheadaca'
 param containerAppsEnvironmentName string
-@description('Azure Storage account name for PureOTA files.')
-param pureotaStorageAccountName string
-@description('Azure Files share name.')
-param pureotaFileShareName string
-@description('PureOTA managed identity name.')
-param pureotaIdentityName string
-@description('HelixBridge managed identity name.')
-param helixIdentityName string
-@description('Storage managed identity name.')
-param storageIdentityName string
-@description('GitHub Actions managed identity name.')
 param githubIdentityName string
-@description('PureOTA Container App name.')
-param pureotaAppName string
-@description('HelixBridge Container App name.')
-param helixAppName string
-@description('PureOTA Container Apps Job name.')
-param pureotaJobName string
-@description('Container Apps Azure Files storage binding name.')
-param storageBindingName string
-@description('Key Vault secret name for Azure Files storage key.')
-param pureotaStorageKeySecretName string
-@description('Key Vault secret name for PureOTA Entra client secret.')
-param pureotaAuthSecretName string
-@description('Key Vault secret name for HelixBridge Entra client secret.')
-param helixAuthSecretName string
-@description('Resource group budget name.')
+param storageIdentityName string = 'NANDA-id-aca-storage'
 param budgetName string
-@description('ACR private endpoint name.')
 param acrPrivateEndpointName string
-@description('Key Vault private endpoint name.')
 param keyVaultPrivateEndpointName string
-@description('PostgreSQL private endpoint name.')
 param postgresPrivateEndpointName string
-@description('Azure Files storage private endpoint name.')
-param storagePrivateEndpointName string
 
 resource rg 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: resourceGroupName
@@ -112,6 +63,25 @@ module law './Modules/logAnalytics.bicep' = {
   }
 }
 
+module githubIdentity './Modules/githubActionsIdentity.bicep' = {
+  name: 'githubIdentity'
+  scope: rg
+  params: {
+    identityName: githubIdentityName
+    location: location
+    githubRepositorySubjectPrefix: githubRepositorySubjectPrefix
+  }
+}
+
+module storageIdentity './Modules/managedIdentity.bicep' = {
+  name: 'storageIdentity'
+  scope: rg
+  params: {
+    identityName: storageIdentityName
+    location: location
+  }
+}
+
 module acr './Modules/acr.bicep' = {
   name: 'acr'
   scope: rg
@@ -119,8 +89,6 @@ module acr './Modules/acr.bicep' = {
     registryName: acrName
     location: location
     retentionDays: 30
-    pureotaPrincipalId: pureotaIdentity.outputs.principalId
-    helixPrincipalId: helixIdentity.outputs.principalId
     githubPrincipalId: githubIdentity.outputs.principalId
   }
 }
@@ -151,36 +119,8 @@ module acrDns './Modules/privateDns.bicep' = {
     zoneName: 'privatelink.azurecr.io'
     linkName: 'NANDA-link-acr-private-dns'
     vnetId: network.outputs.vnetId
-    privateEndpointName: 'NANDA-pe-acr-arrowhead-aca'
+    privateEndpointName: acrPrivateEndpointName
     zoneGroupName: 'acr-dns-zone-group'
-  }
-}
-
-module pureotaIdentity './Modules/managedIdentity.bicep' = {
-  name: 'pureotaIdentity'
-  scope: rg
-  params: { name: pureotaIdentityName
-location: location }
-}
-module helixIdentity './Modules/managedIdentity.bicep' = {
-  name: 'helixIdentity'
-  scope: rg
-  params: { name: helixIdentityName
-location: location }
-}
-module storageIdentity './Modules/managedIdentity.bicep' = {
-  name: 'storageIdentity'
-  scope: rg
-  params: { name: storageIdentityName
-location: location }
-}
-module githubIdentity './Modules/githubActionsIdentity.bicep' = {
-  name: 'githubIdentity'
-  scope: rg
-  params: {
-    identityName: githubIdentityName
-    location: location
-    githubRepositorySubjectPrefix: githubRepositorySubjectPrefix
   }
 }
 
@@ -193,6 +133,7 @@ module keyVault './Modules/keyVault.bicep' = {
     publicNetworkAccess: enableKeyVaultPrivateEndpoint ? 'Disabled' : 'Enabled'
   }
 }
+
 module keyVaultDiagnostics './Modules/keyVaultDiagnostics.bicep' = {
   name: 'keyVaultDiagnostics'
   scope: rg
@@ -201,6 +142,7 @@ module keyVaultDiagnostics './Modules/keyVaultDiagnostics.bicep' = {
     workspaceId: law.outputs.id
   }
 }
+
 module keyVaultPe './Modules/privateEndpoint.bicep' = if (enableKeyVaultPrivateEndpoint) {
   name: 'keyVaultPrivateEndpoint'
   scope: rg
@@ -213,6 +155,7 @@ module keyVaultPe './Modules/privateEndpoint.bicep' = if (enableKeyVaultPrivateE
     connectionName: 'keyvault'
   }
 }
+
 module keyVaultDns './Modules/privateDns.bicep' = if (enableKeyVaultPrivateEndpoint) {
   name: 'keyVaultPrivateDns'
   scope: rg
@@ -221,7 +164,7 @@ module keyVaultDns './Modules/privateDns.bicep' = if (enableKeyVaultPrivateEndpo
     zoneName: 'privatelink.vaultcore.azure.net'
     linkName: 'NANDA-link-keyvault-private-dns'
     vnetId: network.outputs.vnetId
-    privateEndpointName: 'NANDA-pe-keyvault-aca'
+    privateEndpointName: keyVaultPrivateEndpointName
     zoneGroupName: 'keyvault-dns-zone-group'
   }
 }
@@ -238,6 +181,7 @@ module postgres './Modules/postgresql.bicep' = {
     backupRetentionDays: 7
   }
 }
+
 module postgresPe './Modules/privateEndpoint.bicep' = {
   name: 'postgresPrivateEndpoint'
   scope: rg
@@ -250,6 +194,7 @@ module postgresPe './Modules/privateEndpoint.bicep' = {
     connectionName: 'postgresql'
   }
 }
+
 module postgresDns './Modules/privateDns.bicep' = {
   name: 'postgresPrivateDns'
   scope: rg
@@ -258,60 +203,23 @@ module postgresDns './Modules/privateDns.bicep' = {
     zoneName: 'privatelink.postgres.database.azure.com'
     linkName: 'NANDA-link-postgresql-private-dns'
     vnetId: network.outputs.vnetId
-    privateEndpointName: 'NANDA-pe-postgresql-aca'
+    privateEndpointName: postgresPrivateEndpointName
     zoneGroupName: 'postgresql-dns-zone-group'
   }
 }
-module storage './Modules/storage.bicep' = {
-  name: 'storage'
-  scope: rg
-  params: {
-    storageAccountName: pureotaStorageAccountName
-    location: location
-    fileShareName: pureotaFileShareName
-    fileShareQuotaGB: 100
-  }
-}
-module storagePe './Modules/privateEndpoint.bicep' = {
-  name: 'storagePrivateEndpoint'
-  scope: rg
-  params: {
-    name: storagePrivateEndpointName
-    location: location
-    subnetId: network.outputs.privateEndpointSubnetId
-    targetResourceId: storage.outputs.id
-    groupIds: ['file']
-    connectionName: 'storage-file'
-  }
-}
-module storageDns './Modules/privateDns.bicep' = {
-  name: 'storagePrivateDns'
-  scope: rg
-  dependsOn: [storagePe]
-  params: {
-    zoneName: 'privatelink.file.${az.environment().suffixes.storage}'
-    linkName: 'NANDA-link-pureota-storage-private-dns'
-    vnetId: network.outputs.vnetId
-    privateEndpointName: 'NANDA-pe-pureota-storage'
-    zoneGroupName: 'storage-file-dns-zone-group'
-  }
-}
 
-module azureFilesBackup './Modules/azureFilesBackup.bicep' = {
-  name: 'azureFilesBackup'
+// Shared platform storage account.
+// No application file share is created here; application onboarding creates
+// the required file share, private endpoint and application-specific binding.
+// Shared platform storage account.
+// No application file share is created here; application onboarding creates
+// the required file share, private endpoint and application-specific binding.
+module platformStorage './Modules/storageAccount.bicep' = {
+  name: 'platformStorage'
   scope: rg
-  dependsOn: [
-    storage
-  ]
   params: {
+    storageAccountName: storageAccountName
     location: location
-    vaultName: azureFilesBackupVaultName
-    policyName: azureFilesBackupPolicyName
-    storageResourceGroupName: resourceGroupName
-    storageAccountName: pureotaStorageAccountName
-    fileShareName: pureotaFileShareName
-    scheduleRunTimeUtc: azureFilesBackupScheduleRunTimeUtc
-    retentionDays: azureFilesBackupRetentionDays
   }
 }
 
@@ -337,11 +245,6 @@ module githubRgReader './Modules/resourceGroupRoleAssignment.bicep' = {
   }
 }
 
-// GitHub Actions needs deterministic resource-group scope permissions for
-// revision inspection/deployment and ACA Job execution. Resource-group scoped
-// role assignments are deployed through modules because this main file is
-// subscription-scoped. The assignments are therefore reproducible on a clean
-// rebuild without relying on manual RBAC changes.
 module githubRgContainerAppsContributor './Modules/resourceGroupRoleAssignment.bicep' = {
   name: 'githubResourceGroupContainerAppsContributor'
   scope: rg
@@ -360,7 +263,6 @@ module githubRgContainerAppsJobsContributor './Modules/resourceGroupRoleAssignme
   }
 }
 
-
 module budget './Modules/budget.bicep' = {
   name: 'budget'
   scope: rg
@@ -372,20 +274,12 @@ module budget './Modules/budget.bicep' = {
   }
 }
 
-// Runtime starts only after deploy.ps1 has populated Key Vault and Entra configuration.
-
-// Runtime resources are deployed separately by runtime.bicep.
-// This foundation template creates the platform once and never attempts
-// to recreate those resources during the runtime deployment.
-
 output resourceGroup string = rg.name
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultUri string = keyVault.outputs.uri
 output acaEnvironmentId string = acaEnvironment.outputs.id
 output githubActionsClientId string = githubIdentity.outputs.clientId
 output githubActionsPrincipalId string = githubIdentity.outputs.principalId
-output pureotaStorageAccountName string = pureotaStorageAccountName
-output pureotaFileShareName string = pureotaFileShareName
-output azureFilesBackupVaultName string = azureFilesBackupVaultName
-output azureFilesBackupPolicyName string = azureFilesBackupPolicyName
 output postgresqlFqdn string = postgres.outputs.fqdn
+output storageAccountName string = platformStorage.outputs.storageAccountName
+output storageAccountId string = platformStorage.outputs.storageAccountId

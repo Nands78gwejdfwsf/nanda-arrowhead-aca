@@ -3,10 +3,11 @@ param clientId string
 param tenantId string
 param allowedGroupId string
 param settingName string
+param enabled bool = true
 
 resource app 'Microsoft.App/containerApps@2025-07-01' existing = { name: containerAppName }
 
-resource auth 'Microsoft.App/containerApps/authConfigs@2025-07-01' = {
+resource auth 'Microsoft.App/containerApps/authConfigs@2025-07-01' = if (enabled) {
   parent: app
   name: 'current'
   properties: {

@@ -15,6 +15,8 @@ param enableAzureFile bool = false
 param azureFileStorageName string = ''
 param azureFileMountPath string = '/mnt/data'
 param healthPath string = '/healthz'
+param ingressExternal bool = true
+param ingressTransport string = 'Auto'
 param postgresHost string = ''
 param postgresDatabase string = ''
 param postgresUser string = ''
@@ -45,9 +47,9 @@ resource app 'Microsoft.App/containerApps@2025-07-01' = {
         }
       ] : []
       ingress: {
-        external: true
+        external: ingressExternal
         targetPort: containerPort
-        transport: 'Auto'
+        transport: ingressTransport
         allowInsecure: false
       }
     }

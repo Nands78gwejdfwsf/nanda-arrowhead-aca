@@ -5,7 +5,8 @@ param image string
 param identityId string
 param githubActionsPrincipalId string = ''
 param acrLoginServer string
-param storageName string
+param storageName string = ''
+param enableAzureFile bool = false
 param command string
 param postgresHost string = ''
 param postgresDatabase string = ''
@@ -23,12 +24,8 @@ resource job 'Microsoft.App/jobs@2025-10-02-preview' = {
     environmentId: environmentId
     configuration: {
       triggerType: 'Manual'
-      registries: [
-        { server: acrLoginServer
-identity: identityId }
-      ]
-      manualTriggerConfig: { parallelism: 1
-replicaCompletionCount: 1 }
+      registries: [{ server: acrLoginServer, identity: identityId }]
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
       replicaRetryLimit: 1
       replicaTimeout: 300
     }
@@ -47,19 +44,15 @@ replicaCompletionCount: 1 }
             { name: 'PGSSLMODE', value: 'require' }
             { name: 'IDENTITY_CLIENT_ID', value: postgresClientId }
           ] : []
-          resources: { cpu: json('0.25')
-memory: '0.5Gi' }
-          volumeMounts: [
-            { volumeName: 'persistent-data'
-mountPath: '/mnt/tier-data' }
-          ]
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          volumeMounts: enableAzureFile ? [
+            { volumeName: 'persistent-data', mountPath: '/mnt/tier-data' }
+          ] : []
         }
       ]
-      volumes: [
-        { name: 'persistent-data'
-storageType: 'AzureFile'
-storageName: storageName }
-      ]
+      volumes: enableAzureFile ? [
+        { name: 'persistent-data', storageType: 'AzureFile', storageName: storageName }
+      ] : []
     }
   }
 }

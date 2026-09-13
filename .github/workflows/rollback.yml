@@ -6,10 +6,7 @@ on:
       application:
         description: Application to roll back
         required: true
-        type: choice
-        options:
-          - pureota
-          - helixbridge
+        type: string
       commit_sha:
         description: Full Git commit SHA to roll back to
         required: true
@@ -46,7 +43,13 @@ jobs:
           with open("apps/apps.json", encoding="utf-8") as f:
               apps = json.load(f)["applications"]
 
-          app = apps["${{ inputs.application }}"]
+          application = "${{ inputs.application }}"
+          if application not in apps:
+              raise SystemExit(f"Unknown application: {application}")
+          if not apps[application].get("enabled", True):
+              raise SystemExit(f"Application is disabled in apps/apps.json: {application}")
+
+          app = apps[application]
 
           print("containerAppName=" + app["containerAppName"])
           print("imageName=" + app["imageName"])

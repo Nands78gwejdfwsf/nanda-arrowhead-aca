@@ -2,256 +2,133 @@ targetScope = 'resourceGroup'
 
 @description('Azure region')
 param location string = 'westus'
-
-@description('Existing resource group')
-param resourceGroupName string
-
+@description('Enabled application configurations from apps/apps.json.')
+param enabledApplications array
+@description('Applications with Azure Files enabled.')
+param storageApplications array
+@description('Applications with ACA Jobs enabled.')
+param jobApplications array
+@description('Applications with Easy Auth enabled.')
+param authApplications array
+@description('Runtime Entra metadata keyed by application key. Each entry contains groupId and clientId.')
+param entraMetadata object
 @description('PostgreSQL Entra administrator group object ID')
 param postgresqlEntraAdministratorObjectId string
-
 @description('PostgreSQL Entra administrator group display name')
 param postgresqlEntraAdministratorName string
-
-@description('PureOTA Entra group object ID')
-param pureotaEntraGroupObjectId string
-
-@description('PureOTA Entra application client ID')
-param pureotaEntraClientId string
-
-@description('HelixBridge Entra group object ID')
-param helixbridgeEntraGroupObjectId string
-
-@description('HelixBridge Entra application client ID')
-param helixbridgeEntraClientId string
-
 @description('Microsoft Entra tenant ID')
 param tenantId string
-
 @description('Monitoring notification email')
 param notificationEmail string
 
-@description('Azure Container Registry name.')
 param acrName string
-@description('Key Vault name.')
 param keyVaultName string
-@description('PostgreSQL Flexible Server name.')
 param postgresqlServerName string
-@description('Azure Container Apps environment name.')
 param containerAppsEnvironmentName string
-@description('Azure Storage account name for PureOTA files.')
-param pureotaStorageAccountName string
-@description('Azure Files share name.')
-param pureotaFileShareName string
-@description('PureOTA managed identity name.')
-param pureotaIdentityName string
-@description('HelixBridge managed identity name.')
-param helixIdentityName string
-@description('Storage managed identity name.')
 param storageIdentityName string
-@description('GitHub Actions managed identity name.')
 param githubIdentityName string
-@description('PureOTA Container App name.')
-param pureotaAppName string
-@description('HelixBridge Container App name.')
-param helixAppName string
-@description('PureOTA Container Apps Job name.')
-param pureotaJobName string
-@description('Container Apps Azure Files storage binding name.')
-param storageBindingName string
-@description('Key Vault secret name for Azure Files storage key.')
-param pureotaStorageKeySecretName string
-@description('Key Vault secret name for PureOTA Entra client secret.')
-param pureotaAuthSecretName string
-@description('Key Vault secret name for HelixBridge Entra client secret.')
-param helixAuthSecretName string
-@description('Log Analytics workspace name.')
 param logAnalyticsWorkspaceName string
-@description('PostgreSQL database name.')
-param postgresDatabaseName string
-@description('Azure Monitor action group name.')
 param monitoringActionGroupName string
 
-resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
-  name: acrName
-}
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = { name: acrName }
+resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' existing = { name: postgresqlServerName }
+resource acaEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' existing = { name: containerAppsEnvironmentName }
+resource storageIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = { name: storageIdentityName }
+resource githubIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = { name: githubIdentityName }
+resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = { name: logAnalyticsWorkspaceName }
 
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: keyVaultName
-}
+resource appIdentityRefs 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = [for app in enabledApplications: {
+  name: app.value.identity.name
+}]
 
-resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' existing = {
-  name: postgresqlServerName
-}
+resource storageRefs 'Microsoft.Storage/storageAccounts@2023-05-01' existing = [for app in storageApplications: {
+  name: app.value.storage.accountName
+}]
 
-resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
-  name: pureotaStorageAccountName
-}
+resource authIdentityRefs 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = [for app in authApplications: {
+  name: app.value.identity.name
+}]
 
-resource acaEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' existing = {
-  name: containerAppsEnvironmentName
-}
+resource jobIdentityRefs 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = [for app in jobApplications: {
+  name: app.value.identity.name
+}]
 
-resource pureotaIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
-  name: pureotaIdentityName
-}
-
-resource helixIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
-  name: helixIdentityName
-}
-
-resource storageIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
-  name: storageIdentityName
-}
-
-resource githubIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
-  name: githubIdentityName
-}
-
-resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
-  name: logAnalyticsWorkspaceName
-}
-
-module storageKvAccess './Modules/roleAssignment.bicep' = {
-  name: 'storageKvAccess'
-  params: {
-    keyVaultName: keyVaultName
-    secretName: pureotaStorageKeySecretName
-    principalId: storageIdentity.properties.principalId
-    roleDefinitionId: '4633458b-17de-408a-b874-0445c86b69e6'
-  }
-}
-
-module pureotaKvAccess './Modules/roleAssignment.bicep' = {
-  name: 'pureotaKvAccess'
-  params: {
-    keyVaultName: keyVaultName
-    secretName: pureotaAuthSecretName
-    principalId: pureotaIdentity.properties.principalId
-    roleDefinitionId: '4633458b-17de-408a-b874-0445c86b69e6'
-  }
-}
-
-module helixKvAccess './Modules/roleAssignment.bicep' = {
-  name: 'helixKvAccess'
-  params: {
-    keyVaultName: keyVaultName
-    secretName: helixAuthSecretName
-    principalId: helixIdentity.properties.principalId
-    roleDefinitionId: '4633458b-17de-408a-b874-0445c86b69e6'
-  }
-}
-
-module containerStorage './Modules/containerAppsStorage.bicep' = {
-  name: 'containerStorage'
-  dependsOn: [storageKvAccess]
+module containerStorage './Modules/containerAppsStorage.bicep' = [for app in storageApplications: {
+  name: 'containerStorage-${app.key}'
   params: {
     environmentName: containerAppsEnvironmentName
-    storageName: storageBindingName
-    storageAccountName: pureotaStorageAccountName
-    fileShareName: pureotaFileShareName
+    storageName: app.value.storage.bindingName
+    storageAccountName: app.value.storage.accountName
+    fileShareName: app.value.storage.fileShareName
     keyVaultName: keyVaultName
     storageIdentityId: storageIdentity.id
-    secretName: pureotaStorageKeySecretName
+    secretName: app.value.keyVault.storageKeySecretName
   }
-}
+}]
 
-module pureotaApp './Modules/containerApp.bicep' = {
-  name: 'pureotaApp'
-  dependsOn: [containerStorage, pureotaKvAccess]
-  params: {
-    name: pureotaAppName
-    location: location
-    environmentId: acaEnvironment.id
-    image: 'nginx:alpine'
-    containerPort: 80
-    minReplicas: 1
-    maxReplicas: 1
-    identityId: pureotaIdentity.id
-    githubActionsPrincipalId: githubIdentity.properties.principalId
-    acrLoginServer: '${acr.name}.azurecr.io'
-    keyVaultName: keyVaultName
-    keyVaultSecretName: pureotaAuthSecretName
-    enableKeyVaultSecret: true
-    enableAzureFile: true
-    azureFileStorageName: storageBindingName
-    azureFileMountPath: '/usr/share/nginx/html/tier-data'
-    healthPath: '/healthz'
-    postgresHost: postgres.properties.fullyQualifiedDomainName
-    postgresDatabase: postgresDatabaseName
-    postgresUser: pureotaIdentityName
-    postgresClientId: pureotaIdentity.properties.clientId
-  }
-}
-
-module helixApp './Modules/containerApp.bicep' = {
-  name: 'helixApp'
-  dependsOn: [helixKvAccess]
-  params: {
-    name: helixAppName
-    location: location
-    environmentId: acaEnvironment.id
-    image: 'nginx:alpine'
-    containerPort: 80
-    minReplicas: 1
-    maxReplicas: 1
-    identityId: helixIdentity.id
-    githubActionsPrincipalId: githubIdentity.properties.principalId
-    acrLoginServer: '${acr.name}.azurecr.io'
-    keyVaultName: keyVaultName
-    keyVaultSecretName: helixAuthSecretName
-    enableKeyVaultSecret: true
-    enableAzureFile: false
-    healthPath: '/healthz'
-    postgresHost: postgres.properties.fullyQualifiedDomainName
-    postgresDatabase: postgresDatabaseName
-    postgresUser: helixIdentityName
-    postgresClientId: helixIdentity.properties.clientId
-  }
-}
-
-module pureotaAuth './Modules/containerAppAuth.bicep' = {
-  name: 'pureotaAuth'
-  dependsOn: [pureotaApp]
-  params: {
-    containerAppName: pureotaAppName
-    clientId: pureotaEntraClientId
-    tenantId: tenantId
-    allowedGroupId: pureotaEntraGroupObjectId
-    settingName: pureotaAuthSecretName
-  }
-}
-
-module helixAuth './Modules/containerAppAuth.bicep' = {
-  name: 'helixAuth'
-  dependsOn: [helixApp]
-  params: {
-    containerAppName: helixAppName
-    clientId: helixbridgeEntraClientId
-    tenantId: tenantId
-    allowedGroupId: helixbridgeEntraGroupObjectId
-    settingName: helixAuthSecretName
-  }
-}
-
-module pureotaJob './Modules/containerAppJob.bicep' = {
-  name: 'pureotaJob'
+module containerApps './Modules/containerApp.bicep' = [for (app, i) in enabledApplications: {
+  name: 'containerApp-${app.key}'
   dependsOn: [containerStorage]
   params: {
-    name: pureotaJobName
+    name: app.value.containerAppName
     location: location
     environmentId: acaEnvironment.id
     image: 'nginx:alpine'
-    identityId: pureotaIdentity.id
+    containerPort: int(app.value.targetPort)
+    minReplicas: int(app.value.minReplicas)
+    maxReplicas: int(app.value.maxReplicas)
+    identityId: appIdentityRefs[i].id
     githubActionsPrincipalId: githubIdentity.properties.principalId
-    acrLoginServer: '${acr.name}.azurecr.io'
-    storageName: storageBindingName
-    command: '/usr/local/bin/db-check.sh && echo "PureOTA dummy ACA Job executed" > /mnt/tier-data/job-validation.txt && date -u >> /mnt/tier-data/job-validation.txt && cat /mnt/tier-data/job-validation.txt'
-    postgresHost: postgres.properties.fullyQualifiedDomainName
-    postgresDatabase: postgresDatabaseName
-    postgresUser: pureotaIdentityName
-    postgresClientId: pureotaIdentity.properties.clientId
+    acrLoginServer: acr.properties.loginServer
+    keyVaultName: keyVaultName
+    keyVaultSecretName: app.value.keyVault.authSecretName
+    enableKeyVaultSecret: bool(app.value.keyVault.readAuthSecret)
+    enableAzureFile: bool(app.value.storage.enabled)
+    azureFileStorageName: app.value.storage.bindingName
+    azureFileMountPath: app.value.storage.mountPath
+    healthPath: app.value.healthPath
+    ingressExternal: bool(app.value.ingress.external)
+    ingressTransport: toUpper(app.value.ingress.transport) == 'AUTO' ? 'Auto' : app.value.ingress.transport
+    postgresHost: app.value.postgres.enabled ? postgres.properties.fullyQualifiedDomainName : ''
+    postgresDatabase: app.value.postgres.enabled ? app.value.postgres.databaseName : ''
+    postgresUser: app.value.postgres.enabled ? app.value.identity.name : ''
+    postgresClientId: app.value.postgres.enabled ? appIdentityRefs[i].properties.clientId : ''
   }
-}
+}]
+
+module authConfigs './Modules/containerAppAuth.bicep' = [for (app, i) in authApplications: {
+  name: 'auth-${app.key}'
+  dependsOn: [containerApps]
+  params: {
+    containerAppName: app.value.containerAppName
+    clientId: entraMetadata[app.key].clientId
+    tenantId: tenantId
+    allowedGroupId: entraMetadata[app.key].groupId
+    settingName: app.value.keyVault.authSecretName
+    enabled: true
+  }
+}]
+
+module containerJobs './Modules/containerAppJob.bicep' = [for (app, i) in jobApplications: {
+  name: 'job-${app.key}'
+  dependsOn: [containerStorage]
+  params: {
+    name: app.value.job.jobName
+    location: location
+    environmentId: acaEnvironment.id
+    image: 'nginx:alpine'
+    identityId: jobIdentityRefs[i].id
+    githubActionsPrincipalId: githubIdentity.properties.principalId
+    acrLoginServer: acr.properties.loginServer
+    storageName: app.value.storage.bindingName
+    enableAzureFile: bool(app.value.storage.enabled)
+    command: app.value.job.command
+    postgresHost: app.value.postgres.enabled ? postgres.properties.fullyQualifiedDomainName : ''
+    postgresDatabase: app.value.postgres.enabled ? app.value.postgres.databaseName : ''
+    postgresUser: app.value.postgres.enabled ? app.value.identity.name : ''
+    postgresClientId: app.value.postgres.enabled ? jobIdentityRefs[i].properties.clientId : ''
+  }
+}]
 
 module postgresAdmin './Modules/postgresqlAdmin.bicep' = {
   name: 'postgresAdmin'
@@ -265,22 +142,25 @@ module postgresAdmin './Modules/postgresqlAdmin.bicep' = {
 
 module monitoring './Modules/monitoring.bicep' = {
   name: 'monitoring'
-  dependsOn: [pureotaApp, helixApp, postgres, storage]
+  dependsOn: [
+    containerApps
+    containerJobs
+    authConfigs
+  ]
   params: {
     location: location
     actionGroupName: monitoringActionGroupName
     notificationEmail: notificationEmail
     logAnalyticsWorkspaceId: law.id
-    pureotaAppId: pureotaApp.outputs.id!
-    helixBridgeAppId: helixApp.outputs.id!
+    applicationIds: [for app in enabledApplications: resourceId('Microsoft.App/containerApps', app.value.containerAppName)]
+    applicationNames: [for app in enabledApplications: app.value.containerAppName]
+    storageFileServiceIds: [for app in storageApplications: resourceId('Microsoft.Storage/storageAccounts/fileServices', app.value.storage.accountName, 'default')]
     postgresqlId: postgres.id
-    storageFileServiceId: '${storage.id}/fileServices/default'
     postgresqlConnectionThreshold: 80
     storageThreshold: 80
     fileShareBandwidthThreshold: 80
   }
 }
 
-output pureotaAppName string = pureotaAppName
-output helixBridgeAppName string = helixAppName
+output applicationNames array = [for app in enabledApplications: app.value.containerAppName]
 output postgresqlFqdn string = postgres.properties.fullyQualifiedDomainName
