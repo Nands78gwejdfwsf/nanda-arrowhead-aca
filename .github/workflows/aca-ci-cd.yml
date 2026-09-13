@@ -135,17 +135,125 @@ jobs:
           # Remove duplicates while preserving order.
           selected = list(dict.fromkeys(selected))
 
+          # ----------------------------------------------------
+          # Normalize application configuration.
+          #
+          # The reusable pipeline accepts both the current flat
+          # apps.json format and the older nested format used by
+          # earlier POC files.  This prevents an empty imageName
+          # from producing an invalid Docker reference such as:
+          #
+          #   registry.azurecr.io/:<sha>
+          #
+          # Every field used by later jobs is normalized here.
+          # ----------------------------------------------------
+          def normalize_app(name, app):
+              azure = app.get("azure", {}) or {}
+              source = app.get("source", {}) or {}
+              runtime = app.get("runtime", {}) or {}
+              database = app.get("database", {}) or {}
+              identity = app.get("identity", {}) or {}
+              entra = app.get("entra", {}) or {}
+              key_vault = app.get("keyVault", {}) or {}
+              postgres = app.get("postgres", {}) or database
+              storage = app.get("storage", {}) or {}
+              job = app.get("job", {}) or {}
+
+              def first(*values):
+                  for value in values:
+                      if value is not None and value != "":
+                          return value
+                  return ""
+
+              normalized = dict(app)
+
+              normalized["app"] = name
+              normalized["displayName"] = first(
+                  app.get("displayName"),
+                  runtime.get("displayName"),
+                  name
+              )
+
+              normalized["containerAppName"] = first(
+                  app.get("containerAppName"),
+                  runtime.get("containerAppName"),
+                  runtime.get("name")
+              )
+
+              normalized["imageName"] = first(
+                  app.get("imageName"),
+                  azure.get("imageName"),
+                  source.get("imageName")
+              )
+
+              normalized["buildContext"] = first(
+                  app.get("buildContext"),
+                  source.get("buildContext"),
+                  source.get("context")
+              )
+
+              normalized["dockerfile"] = first(
+                  app.get("dockerfile"),
+                  source.get("dockerfile")
+              )
+
+              normalized["targetPort"] = first(
+                  app.get("targetPort"),
+                  runtime.get("targetPort"),
+                  80
+              )
+
+              normalized["healthPath"] = first(
+                  app.get("healthPath"),
+                  runtime.get("healthPath"),
+                  "/healthz"
+              )
+
+              normalized["minReplicas"] = first(
+                  app.get("minReplicas"),
+                  runtime.get("minReplicas"),
+                  1
+              )
+
+              normalized["maxReplicas"] = first(
+                  app.get("maxReplicas"),
+                  runtime.get("maxReplicas"),
+                  1
+              )
+
+              normalized["identity"] = identity
+              normalized["entra"] = entra
+              normalized["keyVault"] = key_vault
+              normalized["postgres"] = postgres
+              normalized["storage"] = storage
+              normalized["job"] = job
+
+              # Fail during discovery with a useful message instead
+              # of allowing Docker to report "invalid reference format".
+              required = {
+                  "containerAppName": normalized["containerAppName"],
+                  "imageName": normalized["imageName"],
+                  "buildContext": normalized["buildContext"],
+                  "dockerfile": normalized["dockerfile"]
+              }
+
+              missing = [key for key, value in required.items() if not value]
+              if missing:
+                  raise SystemExit(
+                      f"Application '{name}' is missing required configuration: "
+                      + ", ".join(missing)
+                  )
+
+              return normalized
+
           matrix = {
               "include": [
-                  {
-                      "app": name,
-                      **cfg[name],
-                  }
+                  normalize_app(name, cfg[name])
                   for name in selected
               ]
           }
 
-          print("Selected applications:")
+          print("Normalized selected applications:")
           print(json.dumps(matrix, indent=2))
 
           with open(
@@ -210,6 +318,17 @@ jobs:
 
         run: |
           set -euo pipefail
+
+          if [[ -z "${{ matrix.imageName }}" ]]; then
+            echo "ERROR: matrix.imageName is empty."
+            echo "The application configuration was not normalized correctly."
+            exit 1
+          fi
+
+          if [[ -z "$ACR_LOGIN_SERVER" ]]; then
+            echo "ERROR: ACR_LOGIN_SERVER is empty."
+            exit 1
+          fi
 
           image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
 

@@ -190,77 +190,104 @@ function Get-AppConfig {
 
     $raw = $property.Value
 
-    # Normalize both supported configuration shapes into the canonical runtime
-    # contract. This keeps onboarding reusable even if an older apps.json uses
-    # source/runtime/azure/database nesting.
-    $hasIdentity = $null -ne $raw.PSObject.Properties['identity']
-    $hasAzure = $null -ne $raw.PSObject.Properties['azure']
-
-    if ($hasIdentity) {
-        $app = $raw
-    }
-    elseif ($hasAzure) {
-        $app = [ordered]@{
-            displayName = [string]$raw.displayName
-            enabled = [bool]$raw.enabled
-            containerAppName = [string]$raw.azure.containerAppName
-            imageName = [string]$raw.source.imageName
-            buildContext = [string]$raw.source.buildContext
-            dockerfile = [string]$raw.source.dockerfile
-            targetPort = [int]$raw.runtime.targetPort
-            healthPath = [string]$raw.runtime.healthPath
-            minReplicas = if ($null -ne $raw.runtime.PSObject.Properties['minReplicas']) { [int]$raw.runtime.minReplicas } else { 1 }
-            maxReplicas = if ($null -ne $raw.runtime.PSObject.Properties['maxReplicas']) { [int]$raw.runtime.maxReplicas } else { 2 }
-            ingress = [ordered]@{
-                external = [bool]$raw.runtime.ingressExternal
-                transport = if ($null -ne $raw.runtime.PSObject.Properties['ingressTransport']) { [string]$raw.runtime.ingressTransport } else { 'auto' }
-            }
-            identity = [ordered]@{
-                name = [string]$raw.azure.managedIdentityName
-            }
-            entra = [ordered]@{
-                groupName = [string]$raw.azure.entraGroupName
-                applicationName = [string]$raw.azure.appRegistrationName
-                redirectPath = '/.auth/login/aad/callback'
-            }
-            keyVault = [ordered]@{
-                authSecretName = [string]$raw.keyVault.authSecretName
-                storageKeySecretName = [string]$raw.keyVault.storageKeySecretName
-                # These flags are optional in the legacy application configuration.
-                # Default them safely instead of dereferencing a missing property
-                # under Set-StrictMode.
-                readAuthSecret = if ($null -ne $raw.keyVault.PSObject.Properties['readAuthSecret']) {
-                    [bool]$raw.keyVault.readAuthSecret
-                } else {
-                    $true
-                }
-                readStorageKeySecret = if ($null -ne $raw.keyVault.PSObject.Properties['readStorageKeySecret']) {
-                    [bool]$raw.keyVault.readStorageKeySecret
-                } else {
-                    [bool]$raw.storage.enabled
-                }
-            }
-            postgres = [ordered]@{
-                enabled = [bool]$raw.database.enabled
-                databaseName = [string]$raw.database.databaseName
-                schemaName = [string]$raw.database.schemaName
-            }
-            storage = [ordered]@{
-                enabled = [bool]$raw.storage.enabled
-                accountName = [string]$raw.storage.accountName
-                fileShareName = [string]$raw.storage.fileShareName
-                bindingName = if ($null -ne $raw.storage.PSObject.Properties['bindingName']) { [string]$raw.storage.bindingName } else { "nanda-$Application-storage" }
-                mountPath = [string]$raw.storage.mountPath
-            }
-            job = [ordered]@{
-                enabled = [bool]$raw.job.enabled
-                jobName = [string]$raw.job.jobName
-                command = [string]$raw.job.command
-            }
+    # Normalize the selected application into one canonical contract.
+    # This is deliberately independent of the input layout so future apps can
+    # use either the current flat shape or the older azure/source/runtime shape.
+    $getProp = {
+        param($Object, [string]$Name, $Default)
+        if ($null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]) {
+            return $Object.PSObject.Properties[$Name].Value
         }
+        return $Default
     }
-    else {
-        throw "Application '$Application' in apps.json is not in a supported configuration shape. Expected either 'identity' or legacy 'azure' configuration."
+
+    $enabledValue = & $getProp $raw 'enabled' $true
+    $azure = & $getProp $raw 'azure' $null
+    $source = & $getProp $raw 'source' $null
+    $runtime = & $getProp $raw 'runtime' $null
+    $legacyDb = & $getProp $raw 'database' $null
+    $keyVaultRaw = & $getProp $raw 'keyVault' $null
+    $storageRaw = & $getProp $raw 'storage' $null
+    $jobRaw = & $getProp $raw 'job' $null
+    $identityRaw = & $getProp $raw 'identity' $null
+    $entraRaw = & $getProp $raw 'entra' $null
+    $ingressRaw = & $getProp $raw 'ingress' $null
+    $postgresRaw = & $getProp $raw 'postgres' $null
+
+    $containerAppName = if ($null -ne $raw.PSObject.Properties['containerAppName']) { [string]$raw.containerAppName } else { [string]$azure.containerAppName }
+    $imageName = if ($null -ne $raw.PSObject.Properties['imageName']) { [string]$raw.imageName } else { [string]$source.imageName }
+    $buildContext = if ($null -ne $raw.PSObject.Properties['buildContext']) { [string]$raw.buildContext } else { [string]$source.buildContext }
+    $dockerfile = if ($null -ne $raw.PSObject.Properties['dockerfile']) { [string]$raw.dockerfile } else { [string]$source.dockerfile }
+    $targetPort = if ($null -ne $raw.PSObject.Properties['targetPort']) { [int]$raw.targetPort } else { [int]$runtime.targetPort }
+    $healthPath = if ($null -ne $raw.PSObject.Properties['healthPath']) { [string]$raw.healthPath } else { [string]$runtime.healthPath }
+    $minReplicas = if ($null -ne $raw.PSObject.Properties['minReplicas']) { [int]$raw.minReplicas } elseif ($null -ne $runtime -and $null -ne $runtime.PSObject.Properties['minReplicas']) { [int]$runtime.minReplicas } else { 1 }
+    $maxReplicas = if ($null -ne $raw.PSObject.Properties['maxReplicas']) { [int]$raw.maxReplicas } elseif ($null -ne $runtime -and $null -ne $runtime.PSObject.Properties['maxReplicas']) { [int]$runtime.maxReplicas } else { 2 }
+
+    $identityName = if ($null -ne $identityRaw -and $null -ne $identityRaw.PSObject.Properties['name']) { [string]$identityRaw.name } else { [string]$azure.managedIdentityName }
+    $groupName = if ($null -ne $entraRaw -and $null -ne $entraRaw.PSObject.Properties['groupName']) { [string]$entraRaw.groupName } else { [string]$azure.entraGroupName }
+    $applicationName = if ($null -ne $entraRaw -and $null -ne $entraRaw.PSObject.Properties['applicationName']) { [string]$entraRaw.applicationName } else { [string]$azure.appRegistrationName }
+    $redirectPath = if ($null -ne $entraRaw -and $null -ne $entraRaw.PSObject.Properties['redirectPath']) { [string]$entraRaw.redirectPath } else { '/.auth/login/aad/callback' }
+
+    $kvAuth = if ($null -ne $keyVaultRaw) { [string]$keyVaultRaw.authSecretName } else { '' }
+    $kvStorage = if ($null -ne $keyVaultRaw) { [string]$keyVaultRaw.storageKeySecretName } else { '' }
+    $readAuth = if ($null -ne $keyVaultRaw -and $null -ne $keyVaultRaw.PSObject.Properties['readAuthSecret']) { [bool]$keyVaultRaw.readAuthSecret } else { $true }
+    $readStorage = if ($null -ne $keyVaultRaw -and $null -ne $keyVaultRaw.PSObject.Properties['readStorageKeySecret']) { [bool]$keyVaultRaw.readStorageKeySecret } else { [bool](& $getProp $storageRaw 'enabled' $false) }
+
+    $dbEnabled = if ($null -ne $postgresRaw) { [bool]$postgresRaw.enabled } elseif ($null -ne $legacyDb) { [bool]$legacyDb.enabled } else { $false }
+    $dbName = if ($null -ne $postgresRaw) { [string]$postgresRaw.databaseName } elseif ($null -ne $legacyDb) { [string]$legacyDb.databaseName } else { '' }
+    $schemaName = if ($null -ne $postgresRaw) { [string]$postgresRaw.schemaName } elseif ($null -ne $legacyDb) { [string]$legacyDb.schemaName } else { '' }
+
+    $storageEnabled = [bool](& $getProp $storageRaw 'enabled' $false)
+    $jobEnabled = [bool](& $getProp $jobRaw 'enabled' $false)
+
+    $app = [pscustomobject][ordered]@{
+        displayName = [string](& $getProp $raw 'displayName' $Application)
+        enabled = [bool]$enabledValue
+        containerAppName = $containerAppName
+        imageName = $imageName
+        buildContext = $buildContext
+        dockerfile = $dockerfile
+        targetPort = $targetPort
+        healthPath = $healthPath
+        minReplicas = $minReplicas
+        maxReplicas = $maxReplicas
+        ingress = [pscustomobject][ordered]@{
+            external = if ($null -ne $ingressRaw) { [bool]$ingressRaw.external } else { [bool](& $getProp $runtime 'ingressExternal' $true) }
+            transport = if ($null -ne $ingressRaw -and $null -ne $ingressRaw.PSObject.Properties['transport']) { [string]$ingressRaw.transport } else { [string](& $getProp $runtime 'ingressTransport' 'auto') }
+        }
+        identity = [pscustomobject]@{ name = $identityName }
+        entra = [pscustomobject][ordered]@{
+            groupName = $groupName
+            applicationName = $applicationName
+            redirectPath = $redirectPath
+        }
+        keyVault = [pscustomobject][ordered]@{
+            authSecretName = $kvAuth
+            storageKeySecretName = $kvStorage
+            readAuthSecret = $readAuth
+            readStorageKeySecret = $readStorage
+        }
+        postgres = [pscustomobject][ordered]@{
+            enabled = $dbEnabled
+            databaseName = $dbName
+            schemaName = $schemaName
+        }
+        storage = [pscustomobject][ordered]@{
+            enabled = $storageEnabled
+            accountName = [string](& $getProp $storageRaw 'accountName' '')
+            fileShareName = [string](& $getProp $storageRaw 'fileShareName' '')
+            bindingName = [string](& $getProp $storageRaw 'bindingName' "nanda-$($property.Name)-storage")
+            mountPath = [string](& $getProp $storageRaw 'mountPath' '')
+            privateEndpointName = [string](& $getProp $storageRaw 'privateEndpointName' '')
+            privateDnsLinkName = [string](& $getProp $storageRaw 'privateDnsLinkName' '')
+            privateDnsZoneGroupName = [string](& $getProp $storageRaw 'privateDnsZoneGroupName' '')
+            backupPolicyName = [string](& $getProp $storageRaw 'backupPolicyName' '')
+        }
+        job = [pscustomobject][ordered]@{
+            enabled = $jobEnabled
+            jobName = [string](& $getProp $jobRaw 'jobName' '')
+            command = [string](& $getProp $jobRaw 'command' '')
+        }
     }
 
     if (-not [bool]$app.enabled) {
@@ -308,30 +335,91 @@ function Ensure-AppIdentity {
     param($App)
     Write-Step "2. Ensure $Application managed identity"
     $name = [string]$App.identity.name
-    $id = Get-AzJson @('identity','show','--resource-group',$ResourceGroupName,'--name',$name) -AllowNotFound
-    if ($null -eq $id) {
-        Write-Host "Creating managed identity: $name"
-        Invoke-Az @('identity','create','--resource-group',$ResourceGroupName,'--name',$name,'--location',$Location,'--output','none')
-        $id = Get-AzJson @('identity','show','--resource-group',$ResourceGroupName,'--name',$name) -AllowNotFound
-    } else {
-        Write-Host "Managed identity already exists: $name"
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        throw "Application '$Application' has an empty identity.name."
     }
-    if ($null -eq $id) { throw "Unable to obtain managed identity '$name'." }
-    return $id
+
+    # Use identity list for existence checks. This returns an empty array when
+    # the identity is absent and avoids ResourceNotFound/native-stderr handling
+    # differences across Windows PowerShell and Azure CLI versions.
+    $existing = @(Get-AzJson @(
+        'identity','list',
+        '--resource-group',$ResourceGroupName,
+        '--query',"[?name=='$($name.Replace("'","''"))'] | [0]"
+    )) | Select-Object -First 1
+
+    if ($null -eq $existing) {
+        Write-Host "Managed identity '$name' does not exist. Creating it now..." -ForegroundColor Yellow
+        Invoke-Az @('identity','create','--resource-group',$ResourceGroupName,'--name',$name,'--location',$Location,'--only-show-errors','--output','none')
+    }
+    else {
+        Write-Host "Managed identity already exists: $name" -ForegroundColor Green
+    }
+
+    # Azure may need a short period before the newly-created identity is fully
+    # readable. identity show returns principalId/clientId at the TOP LEVEL.
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
+        $id = $null
+        try {
+            $id = Get-AzJson @(
+                'identity','show',
+                '--resource-group',$ResourceGroupName,
+                '--name',$name
+            ) -AllowNotFound
+        }
+        catch {
+            $id = $null
+        }
+
+        if ($null -ne $id -and
+            -not [string]::IsNullOrWhiteSpace([string]$id.id) -and
+            -not [string]::IsNullOrWhiteSpace([string]$id.principalId) -and
+            -not [string]::IsNullOrWhiteSpace([string]$id.clientId)) {
+            Write-Host "Managed identity ready: $name" -ForegroundColor Green
+            return $id
+        }
+
+        if ($attempt -lt 12) {
+            Write-Host "Waiting for managed identity '$name' to become readable ($attempt/12)..." -ForegroundColor Gray
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    throw "Managed identity '$name' could not be resolved after creation. Verify Azure RBAC/resource-provider access in resource group '$ResourceGroupName'."
 }
 
 function Ensure-EntraGroup {
     param($App)
     Write-Step "3. Ensure $Application Entra security group"
     $name = [string]$App.entra.groupName
-    $group = Get-AzJson @('ad','group','show','--group',$name) -AllowNotFound
-    if ($null -eq $group) {
-        Write-Host "Creating Entra group: $name"
-        $group = Get-AzJson @('ad','group','create','--display-name',$name,'--mail-nickname',($name -replace '[^a-zA-Z0-9]',''))
-    } else {
-        Write-Host "Entra group already exists: $name"
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        throw "Application '$Application' has an empty entra.groupName."
     }
-    if ($null -eq $group.id) { throw "Unable to obtain Entra group object ID." }
+
+    # Use list rather than group show so a missing group is represented by an
+    # empty result without emitting a ResourceNotFound native error.
+    $groups = Get-AzJson @(
+        'ad','group','list',
+        '--filter',"displayName eq '$($name.Replace("'","''"))'"
+    )
+    $group = @($groups | Where-Object { [string]$_.displayName -eq $name } | Select-Object -First 1)
+
+    if ($group.Count -eq 0) {
+        Write-Host "Creating Entra group: $name" -ForegroundColor Yellow
+        $group = @(Get-AzJson @(
+            'ad','group','create',
+            '--display-name',$name,
+            '--mail-nickname',($name -replace '[^a-zA-Z0-9]','')
+        )) | Select-Object -First 1
+    }
+    else {
+        $group = $group[0]
+        Write-Host "Entra group already exists: $name" -ForegroundColor Green
+    }
+
+    if ($null -eq $group -or [string]::IsNullOrWhiteSpace([string]$group.id)) {
+        throw "Unable to obtain Entra group object ID for '$name'."
+    }
     return [string]$group.id
 }
 
@@ -785,6 +873,81 @@ function Escape-SqlIdentifier {
 function Escape-SqlLiteral {
     param([string]$Value)
     return $Value.Replace("'","''")
+}
+
+function Ensure-PostgreSqlEntraAdministrator {
+    param([Parameter(Mandatory = $true)][string]$AdminGroupId)
+
+    Write-Step "9. Configure PostgreSQL Microsoft Entra administrator"
+
+    if ([string]::IsNullOrWhiteSpace($AdminGroupId)) {
+        throw "PostgreSQL Entra administrator group object ID is empty."
+    }
+
+    # Read the currently configured PostgreSQL Entra administrator. The list
+    # command is safe when no administrator exists and avoids ResourceNotFound.
+    $admins = @(Get-AzJson @(
+        'postgres','flexible-server','microsoft-entra-admin','list',
+        '--resource-group',$ResourceGroupName,
+        '--server-name',$PostgreSqlServerName
+    ))
+    $current = $admins | Select-Object -First 1
+
+    $currentObjectId = if ($null -ne $current -and $current.PSObject.Properties.Name -contains 'objectId') { [string]$current.objectId } else { '' }
+
+    if ($currentObjectId -eq $AdminGroupId) {
+        Write-Host "PostgreSQL Microsoft Entra administrator is already configured correctly." -ForegroundColor Green
+    }
+    else {
+        if (-not [string]::IsNullOrWhiteSpace($currentObjectId)) {
+            Write-Host "PostgreSQL has a different Entra administrator. Replacing it with '$PostgresAdminGroupName'..." -ForegroundColor Yellow
+            Invoke-Az @(
+                'postgres','flexible-server','microsoft-entra-admin','delete',
+                '--resource-group',$ResourceGroupName,
+                '--server-name',$PostgreSqlServerName,
+                '--yes',
+                '--only-show-errors',
+                '--output','none'
+            )
+        }
+        else {
+            Write-Host "No PostgreSQL Microsoft Entra administrator is configured. Creating '$PostgresAdminGroupName'..." -ForegroundColor Yellow
+        }
+
+        Invoke-Az @(
+            'postgres','flexible-server','microsoft-entra-admin','create',
+            '--resource-group',$ResourceGroupName,
+            '--server-name',$PostgreSqlServerName,
+            '--display-name',$PostgresAdminGroupName,
+            '--object-id',$AdminGroupId,
+            '--only-show-errors',
+            '--output','none'
+        )
+    }
+
+    # Verify with retries because PostgreSQL control-plane changes can take
+    # time to converge before the administrator is returned by list.
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
+        $verifyList = @(Get-AzJson @(
+            'postgres','flexible-server','microsoft-entra-admin','list',
+            '--resource-group',$ResourceGroupName,
+            '--server-name',$PostgreSqlServerName
+        ))
+        $verify = $verifyList | Select-Object -First 1
+        $verifiedObjectId = if ($null -ne $verify -and $verify.PSObject.Properties.Name -contains 'objectId') { [string]$verify.objectId } else { '' }
+
+        if ($verifiedObjectId -eq $AdminGroupId) {
+            Write-Host "PostgreSQL Microsoft Entra administrator verified: $PostgresAdminGroupName ($AdminGroupId)." -ForegroundColor Green
+            return
+        }
+
+        if ($attempt -lt 12) {
+            Write-Host "Waiting for PostgreSQL Entra administrator propagation ($attempt/12)..." -ForegroundColor Gray
+            Start-Sleep -Seconds 10
+        }
+    }
+
+    throw "PostgreSQL Microsoft Entra administrator verification failed. Expected group object ID '$AdminGroupId'."
 }
 
 function Ensure-PostgreSqlApplicationAccess {
@@ -1446,6 +1609,7 @@ Ensure-StorageKvAccess -App $app
 Ensure-AcrPull -Identity $identity -App $app
 
 $postgresAdminGroupId = Get-PostgresAdminGroupId
+Ensure-PostgreSqlEntraAdministrator -AdminGroupId $postgresAdminGroupId
 
 if ([bool]$app.postgres.enabled) {
     $appPrincipalId = Get-AzText @(
