@@ -6,7 +6,10 @@ on:
       application:
         description: Application to roll back
         required: true
-        type: string
+        type: choice
+        options:
+          - pureota
+          - helixbridge
       commit_sha:
         description: Full Git commit SHA to roll back to
         required: true

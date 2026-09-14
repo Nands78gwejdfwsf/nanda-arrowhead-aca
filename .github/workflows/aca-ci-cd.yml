@@ -10,7 +10,11 @@ on:
         description: Application to deploy
         required: true
         default: all
-        type: string
+        type: choice
+        options:
+          - all
+          - pureota
+          - helixbridge
 
 permissions:
   id-token: write
@@ -110,27 +114,64 @@ jobs:
           # ----------------------------------------------------
           # Normal push to main
           #
-          # Customer CI-3 requires deployment to trigger on every
-          # push or merge to the default branch.
-          #
-          # Therefore a normal push selects all configured
-          # applications. This guarantees the complete deployment
-          # path can run:
-          #
-          # Push -> Build -> Deploy -> Health -> Approval ->
-          # ACA Job (when enabled) -> Promotion
-          #
-          # Manual workflow_dispatch still supports selecting
-          # one application or all applications.
+          # Deploy only the applications whose source/config files
+          # changed in this push. If both application paths changed,
+          # both applications are selected. Changes to shared
+          # platform/configuration files deploy all enabled apps.
+          # This keeps normal application pushes isolated while still
+          # allowing shared platform changes to be validated everywhere.
           # ----------------------------------------------------
           else:
 
-              print(
-                  "Push to main detected; selecting all configured "
-                  "applications for deployment."
+              if before and before != "0" * 40:
+                  changed = subprocess.check_output(
+                      ["git", "diff", "--name-only", before, sha],
+                      text=True,
+                  ).splitlines()
+              else:
+                  changed = subprocess.check_output(
+                      ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha],
+                      text=True,
+                  ).splitlines()
+
+              print("Changed files:")
+              for path in changed:
+                  print(f"  {path}")
+
+              pureota_changed = any(
+                  path == "apps/pureota" or path.startswith("apps/pureota/")
+                  for path in changed
+              )
+              helixbridge_changed = any(
+                  path == "apps/helixbridge" or path.startswith("apps/helixbridge/")
+                  for path in changed
               )
 
-              selected = [name for name, app in cfg.items() if app.get("enabled", True)]
+              # Shared configuration changes can affect every application.
+              shared_change = any(
+                  path in {"apps/apps.json", "platform.json"}
+                  or path.startswith("infrastructure/")
+                  or path.startswith(".github/workflows/")
+                  for path in changed
+              )
+
+              if shared_change:
+                  selected = [
+                      name for name, app in cfg.items()
+                      if app.get("enabled", True)
+                  ]
+                  print("Shared platform/configuration change detected; selecting all enabled applications.")
+              else:
+                  selected = []
+                  if pureota_changed and cfg.get("pureota", {}).get("enabled", True):
+                      selected.append("pureota")
+                  if helixbridge_changed and cfg.get("helixbridge", {}).get("enabled", True):
+                      selected.append("helixbridge")
+
+                  if selected:
+                      print("Application source change detected; selected:", ", ".join(selected))
+                  else:
+                      print("No application source/configuration changes detected; nothing to deploy.")
 
           # Remove duplicates while preserving order.
           selected = list(dict.fromkeys(selected))
