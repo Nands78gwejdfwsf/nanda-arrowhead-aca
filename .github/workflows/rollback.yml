@@ -46,13 +46,7 @@ jobs:
           with open("apps/apps.json", encoding="utf-8") as f:
               apps = json.load(f)["applications"]
 
-          application = "${{ inputs.application }}"
-          if application not in apps:
-              raise SystemExit(f"Unknown application: {application}")
-          if not apps[application].get("enabled", True):
-              raise SystemExit(f"Application is disabled in apps/apps.json: {application}")
-
-          app = apps[application]
+          app = apps["${{ inputs.application }}"]
 
           print("containerAppName=" + app["containerAppName"])
           print("imageName=" + app["imageName"])

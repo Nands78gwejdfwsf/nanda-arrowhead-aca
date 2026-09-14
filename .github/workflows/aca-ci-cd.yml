@@ -98,9 +98,9 @@ jobs:
           if requested and requested != "all":
 
               if requested not in cfg:
-                  raise SystemExit(f"Unknown application: {requested}")
-              if not cfg[requested].get("enabled", True):
-                  raise SystemExit(f"Application is disabled in apps/apps.json: {requested}")
+                  raise SystemExit(
+                      f"Unknown application: {requested}"
+                  )
 
               selected = [requested]
 
@@ -109,192 +109,47 @@ jobs:
           # ----------------------------------------------------
           elif event == "workflow_dispatch":
 
-              selected = [name for name, app in cfg.items() if app.get("enabled", True)]
+              selected = list(cfg)
 
           # ----------------------------------------------------
           # Normal push to main
           #
-          # Deploy only the applications whose source/config files
-          # changed in this push. If both application paths changed,
-          # both applications are selected. Changes to shared
-          # platform/configuration files deploy all enabled apps.
-          # This keeps normal application pushes isolated while still
-          # allowing shared platform changes to be validated everywhere.
+          # Customer CI-3 requires deployment to trigger on every
+          # push or merge to the default branch.
+          #
+          # Therefore a normal push selects all configured
+          # applications. This guarantees the complete deployment
+          # path can run:
+          #
+          # Push -> Build -> Deploy -> Health -> Approval ->
+          # ACA Job (when enabled) -> Promotion
+          #
+          # Manual workflow_dispatch still supports selecting
+          # one application or all applications.
           # ----------------------------------------------------
           else:
 
-              if before and before != "0" * 40:
-                  changed = subprocess.check_output(
-                      ["git", "diff", "--name-only", before, sha],
-                      text=True,
-                  ).splitlines()
-              else:
-                  changed = subprocess.check_output(
-                      ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha],
-                      text=True,
-                  ).splitlines()
-
-              print("Changed files:")
-              for path in changed:
-                  print(f"  {path}")
-
-              pureota_changed = any(
-                  path == "apps/pureota" or path.startswith("apps/pureota/")
-                  for path in changed
-              )
-              helixbridge_changed = any(
-                  path == "apps/helixbridge" or path.startswith("apps/helixbridge/")
-                  for path in changed
+              print(
+                  "Push to main detected; selecting all configured "
+                  "applications for deployment."
               )
 
-              # Shared configuration changes can affect every application.
-              shared_change = any(
-                  path in {"apps/apps.json", "platform.json"}
-                  or path.startswith("infrastructure/")
-                  or path.startswith(".github/workflows/")
-                  for path in changed
-              )
-
-              if shared_change:
-                  selected = [
-                      name for name, app in cfg.items()
-                      if app.get("enabled", True)
-                  ]
-                  print("Shared platform/configuration change detected; selecting all enabled applications.")
-              else:
-                  selected = []
-                  if pureota_changed and cfg.get("pureota", {}).get("enabled", True):
-                      selected.append("pureota")
-                  if helixbridge_changed and cfg.get("helixbridge", {}).get("enabled", True):
-                      selected.append("helixbridge")
-
-                  if selected:
-                      print("Application source change detected; selected:", ", ".join(selected))
-                  else:
-                      print("No application source/configuration changes detected; nothing to deploy.")
+              selected = list(cfg)
 
           # Remove duplicates while preserving order.
           selected = list(dict.fromkeys(selected))
 
-          # ----------------------------------------------------
-          # Normalize application configuration.
-          #
-          # The reusable pipeline accepts both the current flat
-          # apps.json format and the older nested format used by
-          # earlier POC files.  This prevents an empty imageName
-          # from producing an invalid Docker reference such as:
-          #
-          #   registry.azurecr.io/:<sha>
-          #
-          # Every field used by later jobs is normalized here.
-          # ----------------------------------------------------
-          def normalize_app(name, app):
-              azure = app.get("azure", {}) or {}
-              source = app.get("source", {}) or {}
-              runtime = app.get("runtime", {}) or {}
-              database = app.get("database", {}) or {}
-              identity = app.get("identity", {}) or {}
-              entra = app.get("entra", {}) or {}
-              key_vault = app.get("keyVault", {}) or {}
-              postgres = app.get("postgres", {}) or database
-              storage = app.get("storage", {}) or {}
-              job = app.get("job", {}) or {}
-
-              def first(*values):
-                  for value in values:
-                      if value is not None and value != "":
-                          return value
-                  return ""
-
-              normalized = dict(app)
-
-              normalized["app"] = name
-              normalized["displayName"] = first(
-                  app.get("displayName"),
-                  runtime.get("displayName"),
-                  name
-              )
-
-              normalized["containerAppName"] = first(
-                  app.get("containerAppName"),
-                  runtime.get("containerAppName"),
-                  runtime.get("name")
-              )
-
-              normalized["imageName"] = first(
-                  app.get("imageName"),
-                  azure.get("imageName"),
-                  source.get("imageName")
-              )
-
-              normalized["buildContext"] = first(
-                  app.get("buildContext"),
-                  source.get("buildContext"),
-                  source.get("context")
-              )
-
-              normalized["dockerfile"] = first(
-                  app.get("dockerfile"),
-                  source.get("dockerfile")
-              )
-
-              normalized["targetPort"] = first(
-                  app.get("targetPort"),
-                  runtime.get("targetPort"),
-                  80
-              )
-
-              normalized["healthPath"] = first(
-                  app.get("healthPath"),
-                  runtime.get("healthPath"),
-                  "/healthz"
-              )
-
-              normalized["minReplicas"] = first(
-                  app.get("minReplicas"),
-                  runtime.get("minReplicas"),
-                  1
-              )
-
-              normalized["maxReplicas"] = first(
-                  app.get("maxReplicas"),
-                  runtime.get("maxReplicas"),
-                  1
-              )
-
-              normalized["identity"] = identity
-              normalized["entra"] = entra
-              normalized["keyVault"] = key_vault
-              normalized["postgres"] = postgres
-              normalized["storage"] = storage
-              normalized["job"] = job
-
-              # Fail during discovery with a useful message instead
-              # of allowing Docker to report "invalid reference format".
-              required = {
-                  "containerAppName": normalized["containerAppName"],
-                  "imageName": normalized["imageName"],
-                  "buildContext": normalized["buildContext"],
-                  "dockerfile": normalized["dockerfile"]
-              }
-
-              missing = [key for key, value in required.items() if not value]
-              if missing:
-                  raise SystemExit(
-                      f"Application '{name}' is missing required configuration: "
-                      + ", ".join(missing)
-                  )
-
-              return normalized
-
           matrix = {
               "include": [
-                  normalize_app(name, cfg[name])
+                  {
+                      "app": name,
+                      **cfg[name],
+                  }
                   for name in selected
               ]
           }
 
-          print("Normalized selected applications:")
+          print("Selected applications:")
           print(json.dumps(matrix, indent=2))
 
           with open(
@@ -359,17 +214,6 @@ jobs:
 
         run: |
           set -euo pipefail
-
-          if [[ -z "${{ matrix.imageName }}" ]]; then
-            echo "ERROR: matrix.imageName is empty."
-            echo "The application configuration was not normalized correctly."
-            exit 1
-          fi
-
-          if [[ -z "$ACR_LOGIN_SERVER" ]]; then
-            echo "ERROR: ACR_LOGIN_SERVER is empty."
-            exit 1
-          fi
 
           image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
 
@@ -477,6 +321,14 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --image "$image" \
             --revision-suffix "${GITHUB_SHA:0:12}"
+
+          az containerapp ingress update \
+            --name "${{ matrix.containerAppName }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --type internal \
+            --target-port "${{ matrix.targetPort }}" \
+            --transport auto
+
 
       # --------------------------------------------------------
       # Find new revision
@@ -702,7 +554,7 @@ jobs:
 
       - name: Skip when no Job is configured
 
-        if: ${{ !matrix.job.enabled }}
+        if: ${{ !matrix.jobEnabled }}
 
         run: |
           echo "No ACA Job configured."
@@ -710,7 +562,7 @@ jobs:
 
       - name: Azure login with OIDC
 
-        if: ${{ matrix.job.enabled }}
+        if: ${{ matrix.jobEnabled }}
 
         uses: azure/login@v2
 
@@ -722,7 +574,7 @@ jobs:
 
       - name: Update Job to immutable SHA and start it
 
-        if: ${{ matrix.job.enabled }}
+        if: ${{ matrix.jobEnabled }}
 
         id: start
 
@@ -738,12 +590,12 @@ jobs:
           image="$ACR_LOGIN_SERVER/${{ matrix.imageName }}:${GITHUB_SHA}"
 
           az containerapp job update \
-            --name "${{ matrix.job.jobName }}" \
+            --name "${{ matrix.jobName }}" \
             --resource-group "$RESOURCE_GROUP" \
             --image "$image"
 
           execution=$(az containerapp job start \
-            --name "${{ matrix.job.jobName }}" \
+            --name "${{ matrix.jobName }}" \
             --resource-group "$RESOURCE_GROUP" \
             --query name \
             --output tsv)
@@ -753,7 +605,7 @@ jobs:
 
       - name: Wait for Job completion
 
-        if: ${{ matrix.job.enabled }}
+        if: ${{ matrix.jobEnabled }}
 
         env:
           RESOURCE_GROUP: ${{ needs.discover.outputs.resource_group }}
@@ -764,7 +616,7 @@ jobs:
           for i in {1..36}; do
 
             status=$(az containerapp job execution show \
-              --name "${{ matrix.job.jobName }}" \
+              --name "${{ matrix.jobName }}" \
               --resource-group "$RESOURCE_GROUP" \
               --job-execution-name "${{ steps.start.outputs.execution }}" \
               --query properties.status \
