@@ -17,7 +17,7 @@ Azure authentication uses Azure CLI. No GitHub CLI is required.
 [CmdletBinding()]
 param(
     [string]$Location = 'westus',
-    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca-test1',
+    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca',
     [string]$GithubRepository = 'Nands78gwejdfwsf/nanda-arrowhead-aca',
     [string]$NotificationEmail = 'Nandan.NK@Stratogent.com',
     [SecureString]$PostgreSqlPassword
@@ -39,9 +39,9 @@ $AcaSubnetName = 'NANDA-snet-aca'
 $PrivateEndpointSubnetName = 'NANDA-snet-private-endpoint'
 $LogAnalyticsWorkspaceName = 'NANDA-law-arrowhead-aca-test'
 $AcrName = 'nandaacrarrowheadaca'
-$KeyVaultName = 'NANDA-kv-aca-test41'
+$KeyVaultName = 'NANDA-kv-aca-test45'
 $PostgreSqlServerName = 'nanda-pg-aca-test'
-$StorageAccountName = 'nandaarrowheadacatest'
+$StorageAccountName = 'aarrowheadacatest'
 $StorageIdentityName = 'NANDA-id-aca-storage'
 $EnvironmentName = 'NANDA-cae-arrowhead-aca-test'
 $GithubIdentityName = 'NANDA-id-github-actions'
@@ -51,7 +51,7 @@ $KeyVaultPrivateEndpointName = 'NANDA-pe-keyvault-aca'
 $PostgresPrivateEndpointName = 'NANDA-pe-postgresql-aca'
 $StoragePrivateEndpointName = 'NANDA-pe-arrowhead-storage'
 $StoragePrivateDnsLinkName = 'NANDA-link-arrowhead-storage-private-dns'
-$RecoveryServicesVaultName = 'NANDA-rsv-arrowhead-aca-files'
+$RecoveryServicesVaultName = 'NANDA-rsv-arrowhead-files'
 $AzureFilesBackupPolicyName = 'NANDA-afs-daily-30d'
 $MonitoringActionGroupName = 'NANDA-ag-aca-platform'
 $MonthlyBudgetAmount = 120

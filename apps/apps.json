@@ -36,7 +36,7 @@
       },
       "storage": {
         "enabled": true,
-        "accountName": "nandaarrowheadacatest",
+        "accountName": "aarrowheadacatest",
         "fileShareName": "pureota-data",
         "bindingName": "nanda-pureota-storage",
         "mountPath": "/usr/share/nginx/html/tier-data",

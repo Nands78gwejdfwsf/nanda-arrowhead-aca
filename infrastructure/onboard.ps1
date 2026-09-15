@@ -3,19 +3,19 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Application,
 
-    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca-test1',
+    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca',
     [string]$Location = 'westus',
-    [string]$KeyVaultName = 'NANDA-kv-aca-test41',
+    [string]$KeyVaultName = 'NANDA-kv-aca-test45',
     [string]$AcrName = 'nandaacrarrowheadaca',
     [string]$PostgreSqlServerName = 'nanda-pg-aca-test',
     [string]$ContainerAppsEnvironmentName = 'NANDA-cae-arrowhead-aca-test',
-    [string]$StorageAccountName = 'nandaarrowheadacatest',
+    [string]$StorageAccountName = 'aarrowheadacatest',
     [string]$StorageIdentityName = 'NANDA-id-aca-storage',
     [string]$GithubIdentityName = 'NANDA-id-github-actions',
     [string]$LogAnalyticsWorkspaceName = 'NANDA-law-arrowhead-aca-test',
     [string]$MonitoringActionGroupName = 'NANDA-ag-aca-platform',
     [string]$PostgresAdminGroupName = 'NANDA-PureOTA-PostgreSQL-Admins',
-    [string]$RecoveryServicesVaultName = 'NANDA-rsv-arrowhead-aca-files',
+    [string]$RecoveryServicesVaultName = 'NANDA-rsv-arrowhead-files',
     [string]$AzureFilesBackupPolicyName = 'NANDA-afs-daily-30d',
     [string]$RuntimeBicepPath = "$PSScriptRoot\runtime.bicep",
     [string]$AppsConfigPath = "$PSScriptRoot\..\apps\apps.json"
