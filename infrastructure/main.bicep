@@ -33,6 +33,11 @@ param budgetName string
 param acrPrivateEndpointName string
 param keyVaultPrivateEndpointName string
 param postgresPrivateEndpointName string
+@description('Storage Private Endpoint name')
+param storagePrivateEndpointName string = 'NANDA-pe-arrowhead-storage'
+
+@description('Storage Private DNS VNet link name')
+param storagePrivateDnsLinkName string = 'NANDA-link-arrowhead-storage-private-dns'
 
 @description('Recovery Services vault for Azure Files backup.')
 param recoveryServicesVaultName string = 'NANDA-rsv-arrowhead-aca-files12'
@@ -217,9 +222,6 @@ module postgresDns './Modules/privateDns.bicep' = {
 // Shared platform storage account.
 // No application file share is created here; application onboarding creates
 // the required file share, private endpoint and application-specific binding.
-// Shared platform storage account.
-// No application file share is created here; application onboarding creates
-// the required file share, private endpoint and application-specific binding.
 module platformStorage './Modules/storageAccount.bicep' = {
   name: 'platformStorage'
   scope: rg
@@ -228,6 +230,51 @@ module platformStorage './Modules/storageAccount.bicep' = {
     location: location
   }
 }
+
+
+// ============================================================
+// STORAGE PRIVATE ENDPOINT
+// ============================================================
+
+module storagePrivateEndpoint './Modules/privateEndpoint.bicep' = {
+  name: 'storagePrivateEndpoint'
+  scope: rg
+  dependsOn: [
+    platformStorage
+  ]
+  params: {
+    name: storagePrivateEndpointName
+    location: location
+    subnetId: network.outputs.privateEndpointSubnetId
+    targetResourceId: platformStorage.outputs.storageAccountId
+    groupIds: [
+      'file'
+    ]
+    connectionName: 'storage-file'
+  }
+}
+
+
+// ============================================================
+// STORAGE PRIVATE DNS
+// ============================================================
+
+module storagePrivateDns './Modules/privateDns.bicep' = {
+  name: 'storagePrivateDns'
+  scope: rg
+  dependsOn: [
+    storagePrivateEndpoint
+  ]
+  params: {
+    zoneName: 'privatelink.file.core.windows.net'
+    linkName: storagePrivateDnsLinkName
+    vnetId: network.outputs.vnetId
+    privateEndpointName: storagePrivateEndpointName
+    zoneGroupName: 'storage-file-dns-zone-group'
+  }
+}
+
+
 module azureFilesBackup './Modules/azureFilesBackup.bicep' = {
   name: 'azureFilesBackup'
   scope: rg
@@ -237,7 +284,6 @@ module azureFilesBackup './Modules/azureFilesBackup.bicep' = {
     policyName: azureFilesBackupPolicyName
   }
 }
-
 module acaEnvironment './Modules/containerAppsEnvironment.bicep' = {
   name: 'containerAppsEnvironment'
   scope: rg
