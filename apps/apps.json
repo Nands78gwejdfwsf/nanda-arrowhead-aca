@@ -101,57 +101,6 @@
         "jobName": "",
         "command": ""
       }
-    },
-    "gowda": {
-      "displayName": "Gowda",
-      "enabled": true,
-      "containerAppName": "nanda-ca-gowda",
-      "imageName": "gowda",
-      "buildContext": "apps/gowda",
-      "dockerfile": "apps/gowda/Dockerfile",
-      "targetPort": 80,
-      "healthPath": "/healthz",
-      "minReplicas": 1,
-      "maxReplicas": 2,
-      "ingress": {
-        "external": true,
-        "transport": "auto"
-      },
-      "identity": {
-        "name": "NANDA-id-gowda"
-      },
-      "entra": {
-        "groupName": "NANDA-Gowda-Users",
-        "applicationName": "NANDA-Gowda-ACA-Test",
-        "redirectPath": "/.auth/login/aad/callback"
-      },
-      "keyVault": {
-        "authSecretName": "gowda-entra-client-secret",
-        "storageKeySecretName": "gowda-storage-key",
-        "readAuthSecret": true,
-        "readStorageKeySecret": true
-      },
-      "postgres": {
-        "enabled": true,
-        "databaseName": "arrowhead",
-        "schemaName": "gowda"
-      },
-      "storage": {
-        "enabled": true,
-        "accountName": "nandaarrowheadacatest",
-        "fileShareName": "gowda-data",
-        "bindingName": "nanda-gowda-storage",
-        "mountPath": "/usr/share/nginx/html/tier-data",
-        "privateEndpointName": "NANDA-pe-gowda-storage",
-        "privateDnsLinkName": "NANDA-link-gowda-storage-private-dns",
-        "privateDnsZoneGroupName": "storage-file-dns-zone-group",
-        "backupPolicyName": "NANDA-afs-daily-30d"
-      },
-      "job": {
-        "enabled": true,
-        "jobName": "nanda-job-gowda",
-        "command": "/usr/local/bin/db-check.sh && echo \"Gowda dummy ACA Job executed\" > /mnt/tier-data/job-validation.txt && date -u >> /mnt/tier-data/job-validation.txt && cat /mnt/tier-data/job-validation.txt"
-      }
     }
   }
 }
