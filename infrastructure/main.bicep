@@ -40,7 +40,7 @@ param storagePrivateEndpointName string = 'NANDA-pe-arrowhead-storage'
 param storagePrivateDnsLinkName string = 'NANDA-link-arrowhead-storage-private-dns'
 
 @description('Recovery Services vault for Azure Files backup.')
-param recoveryServicesVaultName string = 'NANDA-rsv-arrowhead-files'
+param recoveryServicesVaultName string = 'NANDA-rsv-arrowhead-filesnanda'
 
 @description('Azure Files daily backup policy name.')
 param azureFilesBackupPolicyName string = 'NANDA-afs-daily-30d'

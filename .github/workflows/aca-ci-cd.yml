@@ -114,30 +114,123 @@ jobs:
           # ----------------------------------------------------
           # Normal push to main
           #
-          # Customer CI-3 requires deployment to trigger on every
-          # push or merge to the default branch.
+          # The workflow still starts for every push/merge to main,
+          # but only applications whose own source/configuration
+          # changed are selected for deployment.
           #
-          # Therefore a normal push selects all configured
-          # applications. This guarantees the complete deployment
-          # path can run:
+          # Application ownership:
+          #   apps/pureota/**       -> pureota
+          #   apps/helixbridge/**  -> helixbridge
           #
-          # Push -> Build -> Deploy -> Health -> Approval ->
-          # ACA Job (when enabled) -> Promotion
+          # Shared application configuration:
+          #   apps/apps.json        -> all enabled applications
           #
-          # Manual workflow_dispatch still supports selecting
-          # one application or all applications.
+          # Platform/IaC and workflow-only changes do NOT trigger
+          # an application image deployment:
+          #   infrastructure/**
+          #   platform.json
+          #   .github/**
+          #
+          # If an application change and an infrastructure change are
+          # in the same commit, the affected application is still
+          # deployed. The infrastructure change is simply reported
+          # in the logs and must be handled through the platform/IaC
+          # process.
           # ----------------------------------------------------
           else:
 
-              print(
-                  "Push to main detected; selecting all configured "
-                  "applications for deployment."
+              if not before or before == "0" * 40:
+                  # First push to the branch: compare the complete
+                  # checked-out tree against the empty tree.
+                  empty_tree = subprocess.check_output(
+                      ["git", "hash-object", "-t", "tree", "/dev/null"],
+                      text=True,
+                  ).strip()
+
+                  changed_files = subprocess.check_output(
+                      ["git", "diff", "--name-only", empty_tree, sha],
+                      text=True,
+                  ).splitlines()
+              else:
+                  changed_files = subprocess.check_output(
+                      ["git", "diff", "--name-only", before, sha],
+                      text=True,
+                  ).splitlines()
+
+              changed_files = [p for p in changed_files if p]
+
+              print("Changed files:")
+              for path in changed_files:
+                  print(f"  {path}")
+
+              pureota_changed = any(
+                  path == "apps/pureota" or path.startswith("apps/pureota/")
+                  for path in changed_files
               )
 
-              selected = list(cfg)
+              helixbridge_changed = any(
+                  path == "apps/helixbridge"
+                  or path.startswith("apps/helixbridge/")
+                  for path in changed_files
+              )
+
+              shared_app_config_changed = "apps/apps.json" in changed_files
+
+              infrastructure_changed = any(
+                  path == "platform.json"
+                  or path.startswith("infrastructure/")
+                  for path in changed_files
+              )
+
+              workflow_changed = any(
+                  path == ".github/"
+                  or path.startswith(".github/")
+                  for path in changed_files
+              )
+
+              selected = []
+
+              if shared_app_config_changed:
+                  print(
+                      "apps/apps.json changed; selecting all enabled "
+                      "applications."
+                  )
+                  selected = list(cfg)
+              else:
+                  if pureota_changed:
+                      selected.append("pureota")
+
+                  if helixbridge_changed:
+                      selected.append("helixbridge")
+
+              if infrastructure_changed:
+                  print(
+                      "Infrastructure/platform files changed. "
+                      "No automatic application deployment is triggered "
+                      "by those files."
+                  )
+
+              if workflow_changed:
+                  print(
+                      "GitHub workflow files changed. "
+                      "No automatic application deployment is triggered "
+                      "by workflow-only changes."
+                  )
+
+              if not selected:
+                  print(
+                      "No application source/configuration changes were "
+                      "detected. No application deployment will run."
+                  )
 
           # Remove duplicates while preserving order.
           selected = list(dict.fromkeys(selected))
+
+          # Ignore applications that are disabled in apps.json.
+          selected = [
+              name for name in selected
+              if cfg.get(name, {}).get("enabled", False)
+          ]
 
           matrix = {
               "include": [
