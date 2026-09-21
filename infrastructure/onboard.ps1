@@ -1,21 +1,21 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Application,
 
-    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca',
+    [string]$ResourceGroupName = 'NANDA-rg-arrowhead-aca1',
     [string]$Location = 'westus',
-    [string]$KeyVaultName = 'NANDA-kv-aca-test46',
+    [string]$KeyVaultName = 'NANDA-kv-aca-test49',
     [string]$AcrName = 'nandaacrarrowheadaca',
     [string]$PostgreSqlServerName = 'nanda-pg-aca-test',
-    [string]$ContainerAppsEnvironmentName = 'NANDA-cae-arrowhead-aca-test',
-    [string]$StorageAccountName = 'aarrowheadacatestnanda',
+    [string]$ContainerAppsEnvironmentName = 'NANDA-cae-arrowhead-aca-test1',
+    [string]$StorageAccountName = 'nanaarrowheadaca',
     [string]$StorageIdentityName = 'NANDA-id-aca-storage',
     [string]$GithubIdentityName = 'NANDA-id-github-actions',
     [string]$LogAnalyticsWorkspaceName = 'NANDA-law-arrowhead-aca-test',
     [string]$MonitoringActionGroupName = 'NANDA-ag-aca-platform',
     [string]$PostgresAdminGroupName = 'NANDA-PureOTA-PostgreSQL-Admins',
-    [string]$RecoveryServicesVaultName = 'NANDA-rsv-arrowhead-filesnanda',
+    [string]$RecoveryServicesVaultName = 'rsv-arrowhead-filesnanda',
     [string]$AzureFilesBackupPolicyName = 'NANDA-afs-daily-30d',
     [string]$RuntimeBicepPath = "$PSScriptRoot\runtime.bicep",
     [string]$AppsConfigPath = "$PSScriptRoot\..\apps\apps.json"
@@ -451,9 +451,236 @@ function Ensure-AppRegistration {
     return @{
         ClientId = $clientId
         ObjectId = [string]$appReg.id
+        ServicePrincipalObjectId = [string]$sp.id
         GroupId = $GroupId
     }
 }
+
+
+
+function Ensure-EntraApplicationSecurity {
+    param(
+        $App,
+        [Parameter(Mandatory = $true)]
+        [string]$ClientId,
+        [Parameter(Mandatory = $true)]
+        [string]$GroupId,
+        [Parameter(Mandatory = $true)]
+        [string]$ServicePrincipalObjectId
+    )
+
+    Write-Step "4A. Ensure $Application Entra application security configuration"
+
+    if ([string]::IsNullOrWhiteSpace($ClientId)) {
+        throw "Client ID is required to configure Entra application security."
+    }
+    if ([string]::IsNullOrWhiteSpace($GroupId)) {
+        throw "Entra security group ID is required to configure application access."
+    }
+    if ([string]::IsNullOrWhiteSpace($ServicePrincipalObjectId)) {
+        throw "Enterprise application service principal object ID is required."
+    }
+
+    # ---------------------------------------------------------------------
+    # 1. Require an explicit Enterprise Application assignment.
+    # ---------------------------------------------------------------------
+    # This is the equivalent of Enterprise applications > Properties >
+    # Assignment required = Yes. It prevents unassigned users from accessing
+    # the application even if they know the sign-in URL.
+    $spPatchFile = Join-Path $env:TEMP ("entra-sp-patch-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+    try {
+        '{"appRoleAssignmentRequired":true}' | Set-Content -Path $spPatchFile -Encoding utf8
+
+        Invoke-Az @(
+            'rest','--method','PATCH',
+            '--url',"https://graph.microsoft.com/v1.0/servicePrincipals/$ServicePrincipalObjectId",
+            '--headers','Content-Type=application/json',
+            '--body',("@" + $spPatchFile),
+            '--output','none'
+        )
+    }
+    finally {
+        Remove-Item -LiteralPath $spPatchFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $spAfterPatch = Get-AzJson @(
+        'rest','--method','GET',
+        '--url',"https://graph.microsoft.com/v1.0/servicePrincipals/$ServicePrincipalObjectId"
+    )
+
+    if ($null -eq $spAfterPatch -or -not [bool]$spAfterPatch.appRoleAssignmentRequired) {
+        throw "Unable to enable appRoleAssignmentRequired for Enterprise Application '$ServicePrincipalObjectId'."
+    }
+
+    Write-Host "Enterprise Application assignment required: ENABLED" -ForegroundColor Green
+
+    # ---------------------------------------------------------------------
+    # 2. Assign the dedicated application security group to the Enterprise
+    #    Application. A zero GUID is the default/no-app-role assignment used
+    #    when the application has no custom app roles.
+    # ---------------------------------------------------------------------
+    $defaultAppRoleId = '00000000-0000-0000-0000-000000000000'
+
+    $existingGroupAssignments = Get-AzJson @(
+        'rest','--method','GET',
+        '--url',"https://graph.microsoft.com/v1.0/servicePrincipals/$ServicePrincipalObjectId/appRoleAssignedTo"
+    )
+
+    $matchingAssignment = @(
+        $existingGroupAssignments.value |
+            Where-Object {
+                [string]$_.principalId -eq $GroupId -and
+                [string]$_.resourceId -eq $ServicePrincipalObjectId
+            }
+    ) | Select-Object -First 1
+
+    if ($null -eq $matchingAssignment) {
+        $assignmentBody = @{
+            principalId = $GroupId
+            resourceId  = $ServicePrincipalObjectId
+            appRoleId   = $defaultAppRoleId
+        } | ConvertTo-Json -Compress
+
+        $assignmentFile = Join-Path $env:TEMP ("entra-group-assignment-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+        try {
+            $assignmentBody | Set-Content -Path $assignmentFile -Encoding utf8
+
+            Invoke-Az @(
+                'rest','--method','POST',
+                '--url',"https://graph.microsoft.com/v1.0/servicePrincipals/$ServicePrincipalObjectId/appRoleAssignedTo",
+                '--headers','Content-Type=application/json',
+                '--body',("@" + $assignmentFile),
+                '--output','none'
+            )
+        }
+        finally {
+            Remove-Item -LiteralPath $assignmentFile -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-Host "Security group '$($App.entra.groupName)' assigned to Enterprise Application." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Security group '$($App.entra.groupName)' is already assigned to Enterprise Application." -ForegroundColor Green
+    }
+
+    # ---------------------------------------------------------------------
+    # 3. Enable ID token issuance for the Web/implicit-hybrid sign-in flow.
+    # ---------------------------------------------------------------------
+    # Container Apps authentication with an existing Entra registration uses
+    # the OpenID Connect callback. ACA requires ID token issuance for this
+    # configuration. Do NOT enable access-token implicit issuance unless the
+    # application has a separate requirement for it.
+    Invoke-Az @(
+        'ad','app','update',
+        '--id',$ClientId,
+        '--enable-id-token-issuance','true',
+        '--only-show-errors',
+        '--output','none'
+    )
+
+    $appAfterImplicit = Get-AzJson @('ad','app','show','--id',$ClientId)
+    $idTokenEnabled = $false
+    if ($null -ne $appAfterImplicit.web -and $null -ne $appAfterImplicit.web.implicitGrantSettings) {
+        $idTokenEnabled = [bool]$appAfterImplicit.web.implicitGrantSettings.enableIdTokenIssuance
+    }
+
+    if (-not $idTokenEnabled) {
+        throw "ID token issuance could not be enabled on app registration '$ClientId'."
+    }
+
+    Write-Host "App Registration ID token issuance: ENABLED" -ForegroundColor Green
+}
+
+function Ensure-MicrosoftGraphGroupPermission {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ClientId
+    )
+
+    Write-Step "4B. Ensure Microsoft Graph GroupMember.Read.All permission"
+
+    $graphAppId = '00000003-0000-0000-c000-000000000000'
+    $groupMemberReadAllRoleId = '98830695-27a2-44f7-8c18-0c3ebc9698f6'
+
+    $permissions = Get-AzJson @(
+        'ad','app','permission','list',
+        '--id',$ClientId
+    )
+
+    $existing = @(
+        $permissions |
+            Where-Object { [string]$_.resourceAppId -eq $graphAppId } |
+            ForEach-Object { $_.resourceAccess } |
+            Where-Object {
+                [string]$_.id -eq $groupMemberReadAllRoleId -and
+                [string]$_.type -eq 'Role'
+            }
+    )
+
+    if ($existing.Count -eq 0) {
+        Invoke-Az @(
+            'ad','app','permission','add',
+            '--id',$ClientId,
+            '--api',$graphAppId,
+            '--api-permissions',"$groupMemberReadAllRoleId=Role",
+            '--only-show-errors',
+            '--output','none'
+        )
+        Write-Host "Microsoft Graph GroupMember.Read.All application permission requested." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Microsoft Graph GroupMember.Read.All application permission already requested." -ForegroundColor Green
+    }
+
+    try {
+        Invoke-Az @(
+            'ad','app','permission','admin-consent',
+            '--id',$ClientId,
+            '--only-show-errors',
+            '--output','none'
+        )
+    }
+    catch {
+        throw "Microsoft Graph GroupMember.Read.All is configured on '$ClientId' but admin consent could not be completed. Run the onboarding as an Entra administrator who can grant tenant-wide application consent, then rerun onboarding. Original error: $($_.Exception.Message)"
+    }
+
+    # Admin consent can take a short time to appear on the Enterprise
+    # Application. Poll the Graph app-role assignment instead of failing
+    # immediately on the first read.
+    $spId = Get-AzText @('ad','sp','show','--id',$ClientId,'--query','id')
+    $graphSpId = Get-AzText @('ad','sp','show','--id',$graphAppId,'--query','id')
+    $graphAssignment = $null
+
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
+        $assignments = Get-AzJson @(
+            'rest','--method','GET',
+            '--url',"https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignments"
+        )
+
+        $graphAssignment = @(
+            $assignments.value |
+                Where-Object {
+                    [string]$_.resourceId -eq $graphSpId -and
+                    [string]$_.appRoleId -eq $groupMemberReadAllRoleId
+                }
+        ) | Select-Object -First 1
+
+        if ($null -ne $graphAssignment) {
+            break
+        }
+
+        if ($attempt -lt 12) {
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    if ($null -eq $graphAssignment) {
+        throw "Microsoft Graph GroupMember.Read.All was requested and admin consent completed, but the application role grant could not be verified for Enterprise Application '$spId'."
+    }
+
+    Write-Host "Microsoft Graph GroupMember.Read.All application permission + consent: VERIFIED" -ForegroundColor Green
+}
+
 
 function Ensure-OnboardingKeyVaultAccess {
     param(
@@ -1561,7 +1788,22 @@ function Validate-Onboarding {
         throw "$Application ACA built-in authentication is not enabled."
     }
 
-    Write-Host "Container App + internal ingress + Easy Auth validation: PASS" -ForegroundColor Green
+    $configuredGroups = @($auth.identityProviders.azureActiveDirectory.validation.defaultAuthorizationPolicy.allowedPrincipals.groups)
+    if ($configuredGroups -notcontains $GroupId) {
+        throw "$Application ACA Easy Auth is not configured with the onboarding security group '$GroupId'."
+    }
+
+    $enterpriseSp = Get-AzJson @('ad','sp','show','--id',$appRegistration.ClientId)
+    if (-not [bool]$enterpriseSp.appRoleAssignmentRequired) {
+        throw "$Application Enterprise Application appRoleAssignmentRequired is not enabled."
+    }
+
+    $entraApp = Get-AzJson @('ad','app','show','--id',$appRegistration.ClientId)
+    if ($null -eq $entraApp.web -or $null -eq $entraApp.web.implicitGrantSettings -or -not [bool]$entraApp.web.implicitGrantSettings.enableIdTokenIssuance) {
+        throw "$Application app registration ID token issuance is not enabled."
+    }
+
+    Write-Host "Container App + internal ingress + Easy Auth + Entra group security validation: PASS" -ForegroundColor Green
 
     if ([bool]$App.storage.enabled) {
         $share = [string]$App.storage.fileShareName
@@ -1627,6 +1869,12 @@ $app = Get-AppConfig
 $identity = Ensure-AppIdentity -App $app
 $groupId = Ensure-EntraGroup -App $app
 $appRegistration = Ensure-AppRegistration -App $app -GroupId $groupId
+Ensure-EntraApplicationSecurity `
+    -App $app `
+    -ClientId $appRegistration.ClientId `
+    -GroupId $groupId `
+    -ServicePrincipalObjectId $appRegistration.ServicePrincipalObjectId
+Ensure-MicrosoftGraphGroupPermission -ClientId $appRegistration.ClientId
 
 Ensure-OnboardingKeyVaultAccess -SecretName ([string]$app.keyVault.authSecretName)
 Ensure-ClientSecret -App $app -ClientId $appRegistration.ClientId
